@@ -155,7 +155,7 @@ const TAG_STYLES: Record<Shop["tag"] extends undefined ? never : "green" | "oran
 /*                                  ΣΕΛΙΔΑ                                     */
 /* -------------------------------------------------------------------------- */
 
-export default function Home() {
+export default function HomePage() {
   const [address, setAddress] = useState(ADDRESSES[0]);
   const [addressOpen, setAddressOpen] = useState(false);
   const [activeCategory, setActiveCategory] = useState("all");
