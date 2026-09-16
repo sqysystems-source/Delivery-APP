@@ -18,7 +18,6 @@
  * ========================================================================== */
 
 import {
-  addDoc,
   collection,
   doc,
   getDoc,
@@ -26,14 +25,13 @@ import {
   limit,
   orderBy,
   query,
-  serverTimestamp,
   where,
   type DocumentData,
   type FirestoreDataConverter,
   type QueryDocumentSnapshot,
   type WithFieldValue,
 } from "firebase/firestore";
-import { db, ensureSignedIn } from "@/lib/firebase";
+import { auth, db, ensureSignedIn } from "@/lib/firebase";
 import { CUISINES, DELIVERY_ADDRESSES } from "@/lib/mock-data";
 import type {
   Cuisine,
@@ -183,26 +181,59 @@ export async function fetchMyOrders(max = 20): Promise<Order[]> {
  * ========================================================================== */
 
 /**
- * Καταχώρηση παραγγελίας. Επιστρέφει τον κωδικό που βλέπει ο πελάτης.
+ * Καταχώρηση παραγγελίας μέσω του server.
  *
- * - `createdAt` γράφεται με serverTimestamp(): η ώρα του server, όχι του
- *   κινητού του πελάτη (που μπορεί να είναι λάθος ρυθμισμένο).
- * - `userId` μπαίνει από το ίδιο το SDK και ελέγχεται στα rules.
- * - Ο κωδικός παράγεται από το doc id, οπότε δεν χρειάζεται δεύτερο write.
+ * ΠΡΟΣΕΞΕ ΤΙ ΔΕΝ ΣΤΕΛΝΕΤΑΙ: καμία τιμή, κανένα σύνολο. Μόνο «ποιο μαγαζί,
+ * ποια προϊόντα, πόσα τεμάχια, πού». Το /api/orders διαβάζει τις τιμές από
+ * το Firestore και υπολογίζει το ποσό. Έτσι, ακόμη κι αν κάποιος πειράξει
+ * το καλάθι στη μνήμη του browser, το μόνο που πετυχαίνει είναι να
+ * παραγγείλει άλλη ποσότητα — όχι να αλλάξει τιμή.
+ *
+ * Τα Security Rules έχουν `allow create: if false` στο collection `orders`,
+ * οπότε αυτή είναι η ΜΟΝΗ διαδρομή δημιουργίας παραγγελίας.
+ *
+ * Επιστρέφει τον κωδικό παραγγελίας (π.χ. «BK-7F3A21»).
  */
 export async function submitOrder(order: NewOrder): Promise<string> {
-  const uid = await ensureSignedIn();
+  await ensureSignedIn();
 
-  // Το createdAt του client δεν το εμπιστευόμαστε — το κρατάμε μόνο ως ένδειξη
-  const { createdAt: clientCreatedAt, ...rest } = order;
+  const user = auth.currentUser;
+  if (!user) {
+    throw new Error("Δεν ήταν δυνατή η ταυτοποίηση. Ανανέωσε τη σελίδα.");
+  }
 
-  const reference = await addDoc(collection(db, "orders"), {
-    ...rest,
-    userId: uid,
-    status: "pending",
-    clientCreatedAt,
-    createdAt: serverTimestamp(),
+  // Το ID token ταυτοποιεί τον χρήστη στον server (ισχύει για 1 ώρα και
+  // ανανεώνεται αυτόματα από το SDK)
+  const idToken = await user.getIdToken();
+
+  const response = await fetch("/api/orders", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({
+      shopId: order.shopId,
+      address: order.address,
+      notes: order.notes,
+      lines: order.lines.map((line) => ({
+        itemId: line.itemId,
+        quantity: line.quantity,
+      })),
+    }),
   });
 
-  return `BK-${reference.id.slice(0, 6).toUpperCase()}`;
+  const data = (await response.json().catch(() => null)) as {
+    ok?: boolean;
+    code?: string;
+    error?: string;
+  } | null;
+
+  if (!response.ok || !data?.ok || !data.code) {
+    throw new Error(
+      data?.error ?? "Δεν ήταν δυνατή η καταχώρηση της παραγγελίας. Δοκίμασε ξανά.",
+    );
+  }
+
+  return data.code;
 }
