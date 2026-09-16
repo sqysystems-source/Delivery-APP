@@ -1,21 +1,27 @@
 /* ==========================================================================
- *  Buka Delivery — app/layout.tsx
+ *  Buka Delivery — app/layout.tsx   (ΕΝΗΜΕΡΩΜΕΝΟ με auth)
  *
- *  Root layout (Server Component).
- *  Εδώ μπαίνουν ΜΙΑ φορά:
- *    • <CartProvider>  → global state καλαθιού, ζει σε όλα τα routes
- *    • <Navbar />      → sticky header με διεύθυνση και καλάθι
- *    • <CartDrawer />  → floating μπάρα + bottom sheet + modal σύγκρουσης
+ *  Root layout (Server Component). Εδώ μπαίνουν ΜΙΑ φορά:
  *
- *  Επειδή ο Provider βρίσκεται πάνω από το {children}, το καλάθι επιβιώνει
- *  στη μετάβαση από «/» προς «/shop/[id]» χωρίς κανένα refetch.
+ *    <AuthProvider>      → κατάσταση χρήστη + προφίλ από Firestore
+ *      <CartProvider>    → κατάσταση καλαθιού
+ *        <Navbar />      → header με διεύθυνση, καλάθι και UserMenu
+ *        {children}      → το εκάστοτε route
+ *        <CartDrawer />  → floating μπάρα + bottom sheet
+ *        <AuthModal />   → σύνδεση / εγγραφή / επαναφορά κωδικού
+ *
+ *  Η σειρά έχει σημασία: το AuthProvider είναι ΕΞΩ από το CartProvider,
+ *  ώστε αργότερα το καλάθι να μπορεί να διαβάσει τον χρήστη (π.χ. για να
+ *  προσυμπληρώνει τη διεύθυνση από το προφίλ). Το αντίστροφο δεν ισχύει.
  * ========================================================================== */
 
 import type { Metadata, Viewport } from "next";
 import { Inter, Geist_Mono } from "next/font/google";
+import { AuthProvider } from "@/context/AuthContext";
 import { CartProvider } from "@/context/CartContext";
 import Navbar from "@/components/Navbar";
 import CartDrawer from "@/components/CartDrawer";
+import AuthModal from "@/components/AuthModal";
 import "./globals.css";
 
 /**
@@ -76,15 +82,18 @@ export default function RootLayout({
       className={`${inter.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-white font-sans text-gray-900">
-        <CartProvider>
-          <Navbar />
+        <AuthProvider>
+          <CartProvider>
+            <Navbar />
 
-          {/* Κάθε route μπαίνει εδώ */}
-          <div className="flex-1">{children}</div>
+            {/* Κάθε route μπαίνει εδώ */}
+            <div className="flex-1">{children}</div>
 
-          {/* Global UI καλαθιού — μία φορά για όλη την εφαρμογή */}
-          <CartDrawer />
-        </CartProvider>
+            {/* Global overlays — μία φορά για όλη την εφαρμογή */}
+            <CartDrawer />
+            <AuthModal />
+          </CartProvider>
+        </AuthProvider>
       </body>
     </html>
   );
