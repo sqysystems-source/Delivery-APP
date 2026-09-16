@@ -292,6 +292,7 @@ export async function POST(request: NextRequest) {
       deliveryFee?: number;
       freeDeliveryOver?: number | null;
       etaMinutes?: [number, number];
+      ownerUid?: string | null;
     };
 
     if (shop.active === false) {
@@ -383,6 +384,11 @@ export async function POST(request: NextRequest) {
     const orderRef = await db.collection("orders").add({
       shopId: input.shopId,
       shopName: shop.name ?? input.shopId,
+      /* Αποθηκεύουμε τον ιδιοκτήτη ΜΕΣΑ στην παραγγελία (denormalization).
+       * Χωρίς αυτό, τα Security Rules θα έκαναν ένα get() στο κατάστημα για
+       * ΚΑΘΕ παραγγελία που φορτώνει το ταμπλό — 50 παραγγελίες, 50 επιπλέον
+       * reads σε κάθε άνοιγμα. Με αυτό, ο έλεγχος είναι απλή σύγκριση. */
+      ownerUid: shop.ownerUid ?? null,
       address: input.address,
       lines: verifiedLines,
       subtotal: toEuros(subtotalCents),
