@@ -1,33 +1,28 @@
 /* ==========================================================================
- *  Buka Delivery — app/layout.tsx   (ΕΝΗΜΕΡΩΜΕΝΟ με auth)
+ *  Buka Delivery — app/layout.tsx   (ROOT LAYOUT, ΜΕΤΑ ΤΑ ROUTE GROUPS)
  *
- *  Root layout (Server Component). Εδώ μπαίνουν ΜΙΑ φορά:
+ *  Το root layout κρατά ΜΟΝΟ ό,τι είναι κοινό σε ΟΛΗ την εφαρμογή:
+ *    • <html> / <body>, γραμματοσειρές, metadata
+ *    • <AuthProvider> — και το κατάστημα και το admin χρειάζονται τον χρήστη
  *
- *    <AuthProvider>      → κατάσταση χρήστη + προφίλ από Firestore
- *      <CartProvider>    → κατάσταση καλαθιού
- *        <Navbar />      → header με διεύθυνση, καλάθι και UserMenu
- *        {children}      → το εκάστοτε route
- *        <CartDrawer />  → floating μπάρα + bottom sheet
- *        <AuthModal />   → σύνδεση / εγγραφή / επαναφορά κωδικού
+ *  Ό,τι αφορά μόνο τον πελάτη (Navbar, καλάθι) μετακόμισε στο
+ *  app/(storefront)/layout.tsx. Ό,τι αφορά μόνο τον καταστηματάρχη πήγε
+ *  στο app/(admin)/layout.tsx.
  *
- *  Η σειρά έχει σημασία: το AuthProvider είναι ΕΞΩ από το CartProvider,
- *  ώστε αργότερα το καλάθι να μπορεί να διαβάσει τον χρήστη (π.χ. για να
- *  προσυμπληρώνει τη διεύθυνση από το προφίλ). Το αντίστροφο δεν ισχύει.
+ *  ΓΙΑΤΙ ΕΜΕΙΝΕ ΕΔΩ ΤΟ AuthProvider:
+ *  Αν μπει ξεχωριστά σε κάθε group, τότε ένας χρήστης που πηγαίνει από το
+ *  /admin στο / ξαναπερνά από πλήρη αρχικοποίηση του Firebase Auth —
+ *  αναβοσβήνει το UI και ξαναδιαβάζεται το προφίλ. Ένας provider, μία φορά.
  * ========================================================================== */
 
 import type { Metadata, Viewport } from "next";
 import { Inter, Geist_Mono } from "next/font/google";
 import { AuthProvider } from "@/context/AuthContext";
-import { CartProvider } from "@/context/CartContext";
-import Navbar from "@/components/Navbar";
-import CartDrawer from "@/components/CartDrawer";
-import AuthModal from "@/components/AuthModal";
 import "./globals.css";
 
 /**
  * ΠΡΟΣΟΧΗ: το Geist ΔΕΝ διαθέτει ελληνικό subset — τα ελληνικά θα έπεφταν
- * σε fallback γραμματοσειρά. Το Inter καλύπτει πλήρως greek + greek-ext και
- * κρατά το ίδιο μοντέρνο, premium ύφος.
+ * σε fallback γραμματοσειρά. Το Inter καλύπτει πλήρως greek + greek-ext.
  */
 const inter = Inter({
   variable: "--font-inter",
@@ -82,18 +77,7 @@ export default function RootLayout({
       className={`${inter.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-white font-sans text-gray-900">
-        <AuthProvider>
-          <CartProvider>
-            <Navbar />
-
-            {/* Κάθε route μπαίνει εδώ */}
-            <div className="flex-1">{children}</div>
-
-            {/* Global overlays — μία φορά για όλη την εφαρμογή */}
-            <CartDrawer />
-            <AuthModal />
-          </CartProvider>
-        </AuthProvider>
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );
