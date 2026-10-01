@@ -31,17 +31,21 @@ import {
   type QueryDocumentSnapshot,
   type WithFieldValue,
 } from "firebase/firestore";
-import { auth, db, ensureSignedIn } from "@/lib/firebase";
-import { CUISINES, DELIVERY_ADDRESSES } from "@/lib/mock-data";
+import { db, ensureSignedIn } from "@/lib/firebase";
+import { CUISINES } from "@/lib/mock-data";
 import type {
   Cuisine,
   Menu,
   MenuCategory,
   MenuItem,
-  NewOrder,
   Order,
   Shop,
 } from "@/types";
+
+/* Η αποστολή παραγγελίας ζει στο lib/checkout/submit-order.ts (επιστρέφει
+ * το πλήρες, επαληθευμένο αποτέλεσμα του server). Εξάγεται και από εδώ, ώστε
+ * το data layer να παραμένει το ένα σημείο εισόδου. */
+export { submitOrder, CheckoutError } from "@/lib/checkout/submit-order";
 
 /* --------------------------------------------------------------------------
  *  Converters
@@ -54,7 +58,8 @@ function converter<T extends { id: string }>(): FirestoreDataConverter<T> {
   return {
     toFirestore(data: WithFieldValue<T>): DocumentData {
       // Το id ζει στο path του document, δεν το διπλογράφουμε μέσα στο doc
-      const { id: _ignored, ...rest } = data as WithFieldValue<T> & { id?: string };
+      const rest: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+      delete rest.id;
       return rest as DocumentData;
     },
     fromFirestore(snapshot: QueryDocumentSnapshot): T {
@@ -146,15 +151,6 @@ export async function fetchMenu(shopId: string): Promise<Menu> {
   };
 }
 
-/**
- * Οι διευθύνσεις του χρήστη.
- * Παραμένουν τοπικές μέχρι να μπει κανονική σύνδεση χρήστη· τότε γίνονται
- * getDocs(collection(db, "users", uid, "addresses")).
- */
-export async function fetchAddresses(): Promise<string[]> {
-  return DELIVERY_ADDRESSES;
-}
-
 /** Ids καταστημάτων για generateStaticParams() σε server rendering */
 export async function fetchShopIds(): Promise<string[]> {
   const snapshot = await getDocs(shopsCollection);
@@ -174,66 +170,4 @@ export async function fetchMyOrders(max = 20): Promise<Order[]> {
     ),
   );
   return snapshot.docs.map((document) => document.data());
-}
-
-/* ==========================================================================
- *  WRITES
- * ========================================================================== */
-
-/**
- * Καταχώρηση παραγγελίας μέσω του server.
- *
- * ΠΡΟΣΕΞΕ ΤΙ ΔΕΝ ΣΤΕΛΝΕΤΑΙ: καμία τιμή, κανένα σύνολο. Μόνο «ποιο μαγαζί,
- * ποια προϊόντα, πόσα τεμάχια, πού». Το /api/orders διαβάζει τις τιμές από
- * το Firestore και υπολογίζει το ποσό. Έτσι, ακόμη κι αν κάποιος πειράξει
- * το καλάθι στη μνήμη του browser, το μόνο που πετυχαίνει είναι να
- * παραγγείλει άλλη ποσότητα — όχι να αλλάξει τιμή.
- *
- * Τα Security Rules έχουν `allow create: if false` στο collection `orders`,
- * οπότε αυτή είναι η ΜΟΝΗ διαδρομή δημιουργίας παραγγελίας.
- *
- * Επιστρέφει τον κωδικό παραγγελίας (π.χ. «BK-7F3A21»).
- */
-export async function submitOrder(order: NewOrder): Promise<string> {
-  await ensureSignedIn();
-
-  const user = auth.currentUser;
-  if (!user) {
-    throw new Error("Δεν ήταν δυνατή η ταυτοποίηση. Ανανέωσε τη σελίδα.");
-  }
-
-  // Το ID token ταυτοποιεί τον χρήστη στον server (ισχύει για 1 ώρα και
-  // ανανεώνεται αυτόματα από το SDK)
-  const idToken = await user.getIdToken();
-
-  const response = await fetch("/api/orders", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${idToken}`,
-    },
-    body: JSON.stringify({
-      shopId: order.shopId,
-      address: order.address,
-      notes: order.notes,
-      lines: order.lines.map((line) => ({
-        itemId: line.itemId,
-        quantity: line.quantity,
-      })),
-    }),
-  });
-
-  const data = (await response.json().catch(() => null)) as {
-    ok?: boolean;
-    code?: string;
-    error?: string;
-  } | null;
-
-  if (!response.ok || !data?.ok || !data.code) {
-    throw new Error(
-      data?.error ?? "Δεν ήταν δυνατή η καταχώρηση της παραγγελίας. Δοκίμασε ξανά.",
-    );
-  }
-
-  return data.code;
 }

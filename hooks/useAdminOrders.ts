@@ -6,27 +6,24 @@
  *  Ζωντανή ροή παραγγελιών για το κατάστημα, με onSnapshot.
  *
  *  ── ΠΩΣ ΒΡΙΣΚΕΙ ΤΟ ΚΑΤΑΣΤΗΜΑ ────────────────────────────────────────────
- *  Ερώτημα στο `shops` με ownerUid == uid. Άρα, για να δουλέψει το panel,
- *  το document του καταστήματος πρέπει να έχει το πεδίο `ownerUid` με το
- *  uid του λογαριασμού του καταστηματάρχη (το seed έγραψε `null`).
- *
- *  Πώς το ορίζεις χωρίς terminal:
- *    1. Ο καταστηματάρχης κάνει εγγραφή κανονικά στο site
- *    2. Firebase Console → Authentication → Users → αντιγράφεις το User UID
- *    3. Firestore → shops → <το κατάστημα> → πεδίο ownerUid → επικόλληση
+ *  Ερώτημα στο `shops` με ownerUid == uid. Το document του καταστήματος
+ *  πρέπει να έχει το πεδίο `ownerUid` με το uid του καταστηματάρχη.
  *
  *  ── COMPOSITE INDEX (ΑΠΑΡΑΙΤΗΤΟ) ───────────────────────────────────────
  *    Collection: orders
  *    Πεδία: shopId (Ascending), createdAt (Descending)
- *  Χωρίς αυτό, το ερώτημα αποτυγχάνει με FAILED_PRECONDITION.
  *
- *  ── ΚΟΣΤΟΣ ──────────────────────────────────────────────────────────────
- *  Το onSnapshot χρεώνει reads μόνο για ό,τι αλλάζει, όχι ανά δευτερόλεπτο.
- *  Το φίλτρο 24ώρου κρατά το αρχικό snapshot μικρό: μια ταμειακή που μένει
- *  ανοιχτή όλη μέρα δεν ξαναδιαβάζει ποτέ το ιστορικό μηνών.
+ *  ── ΜΟΡΦΗ ΠΑΡΑΓΓΕΛΙΩΝ ───────────────────────────────────────────────────
+ *  Η μετατροπή γίνεται στο lib/admin/order-mapper.ts και διαβάζει ΚΑΙ τις
+ *  νέες (με στοιχεία πελάτη/παράδοσης/πληρωμής) ΚΑΙ τις παλαιότερες.
+ *
+ *  ── ΚΑΤΑΣΤΑΣΗ ───────────────────────────────────────────────────────────
+ *  Τα αποτελέσματα αποθηκεύονται μαζί με το «για ποιον/ποιο κατάστημα» και
+ *  το loading/error προκύπτουν κατά το render. Έτσι κανένα effect δεν γράφει
+ *  state συγχρονισμένα — μόνο οι callbacks του Firestore.
  * ========================================================================== */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Timestamp,
   collection,
@@ -42,104 +39,14 @@ import {
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
+import { mapAdminOrder, type AdminOrder } from "@/lib/admin/order-mapper";
 import type { OrderStatus } from "@/types";
 
-/* --------------------------------------------------------------------------
- *  Τύποι
- * -------------------------------------------------------------------------- */
-
-export type AdminOrderLine = {
-  itemId: string;
-  name: string;
-  unitPrice: number;
-  quantity: number;
-  lineTotal: number;
-};
-
-export type AdminOrder = {
-  id: string;
-  /** Ο κωδικός που βλέπει ο πελάτης, π.χ. «BK-7F3A21» */
-  code: string;
-  shopId: string;
-  shopName: string;
-  address: string;
-  lines: AdminOrderLine[];
-  subtotal: number;
-  deliveryFee: number;
-  total: number;
-  status: OrderStatus;
-  userId: string;
-  notes?: string;
-  /** null όσο το serverTimestamp δεν έχει επιβεβαιωθεί από τον server */
-  createdAt: Date | null;
-};
+export type { AdminOrder, AdminOrderLine } from "@/lib/admin/order-mapper";
 
 /** Πόσες ώρες πίσω φορτώνει το ταμπλό */
 const HOURS_WINDOW = 24;
 const MAX_ORDERS = 200;
-
-/* --------------------------------------------------------------------------
- *  Μετατροπή document → AdminOrder (ανθεκτική σε ελλιπή πεδία)
- * -------------------------------------------------------------------------- */
-
-function toNumber(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function toLines(value: unknown): AdminOrderLine[] {
-  if (!Array.isArray(value)) return [];
-
-  return value.map((entry) => {
-    const line = (entry ?? {}) as Record<string, unknown>;
-    const unitPrice = toNumber(line.unitPrice);
-    const quantity = toNumber(line.quantity);
-
-    return {
-      itemId: typeof line.itemId === "string" ? line.itemId : "",
-      name: typeof line.name === "string" ? line.name : "Προϊόν",
-      unitPrice,
-      quantity,
-      lineTotal: line.lineTotal !== undefined ? toNumber(line.lineTotal) : unitPrice * quantity,
-    };
-  });
-}
-
-const VALID_STATUSES: OrderStatus[] = [
-  "pending",
-  "accepted",
-  "preparing",
-  "delivering",
-  "completed",
-  "cancelled",
-];
-
-function toStatus(value: unknown): OrderStatus {
-  return VALID_STATUSES.includes(value as OrderStatus)
-    ? (value as OrderStatus)
-    : "pending";
-}
-
-function mapOrder(id: string, data: Record<string, unknown>): AdminOrder {
-  return {
-    id,
-    code: `BK-${id.slice(0, 6).toUpperCase()}`,
-    shopId: typeof data.shopId === "string" ? data.shopId : "",
-    shopName: typeof data.shopName === "string" ? data.shopName : "",
-    address: typeof data.address === "string" ? data.address : "",
-    lines: toLines(data.lines),
-    subtotal: toNumber(data.subtotal),
-    deliveryFee: toNumber(data.deliveryFee),
-    total: toNumber(data.total),
-    status: toStatus(data.status),
-    userId: typeof data.userId === "string" ? data.userId : "",
-    notes: typeof data.notes === "string" ? data.notes : undefined,
-    createdAt: data.createdAt instanceof Timestamp ? data.createdAt.toDate() : null,
-  };
-}
-
-/* --------------------------------------------------------------------------
- *  Το hook
- * -------------------------------------------------------------------------- */
 
 export type UseAdminOrders = {
   shopId: string | null;
@@ -154,75 +61,82 @@ export type UseAdminOrders = {
   updatingId: string | null;
 };
 
+type ShopLookup = {
+  uid: string;
+  shopId: string | null;
+  shopName: string | null;
+  error: string | null;
+};
+
+type OrderStream = {
+  shopId: string;
+  orders: AdminOrder[];
+  error: string | null;
+  loaded: boolean;
+};
+
 /**
  * @param shopIdOverride — για λογαριασμούς admin που βλέπουν άλλο κατάστημα
  */
 export function useAdminOrders(shopIdOverride?: string): UseAdminOrders {
   const { user, isAuthenticated } = useAuth();
+  const uid = isAuthenticated && user ? user.uid : null;
 
-  const [shopId, setShopId] = useState<string | null>(shopIdOverride ?? null);
-  const [shopName, setShopName] = useState<string | null>(null);
-  const [orders, setOrders] = useState<AdminOrder[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [lookup, setLookup] = useState<ShopLookup | null>(null);
+  const [stream, setStream] = useState<OrderStream | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
-
-  /* Το αρχικό snapshot δεν πρέπει να χτυπήσει συναγερμό για παλιές παραγγελίες */
-  const firstSnapshotRef = useRef(true);
 
   /* ------------------- 1. Ποιο κατάστημα ανήκει στον χρήστη ------------- */
   useEffect(() => {
-    if (shopIdOverride) {
-      setShopId(shopIdOverride);
-      return;
-    }
-
-    if (!isAuthenticated || !user) {
-      setShopId(null);
-      setLoading(false);
-      return;
-    }
+    if (shopIdOverride || !uid) return;
 
     let cancelled = false;
 
-    getDocs(
-      query(collection(db, "shops"), where("ownerUid", "==", user.uid), limit(1)),
-    )
+    getDocs(query(collection(db, "shops"), where("ownerUid", "==", uid), limit(1)))
       .then((snapshot) => {
         if (cancelled) return;
-
         const document = snapshot.docs[0];
-        if (!document) {
-          setShopId(null);
-          setError(
-            "Ο λογαριασμός σου δεν είναι συνδεδεμένος με κατάστημα. " +
-              "Ζήτα από τον διαχειριστή να ορίσει το πεδίο ownerUid στο κατάστημά σου.",
-          );
-          setLoading(false);
-          return;
-        }
 
-        setShopId(document.id);
-        setShopName((document.data().name as string) ?? document.id);
+        setLookup(
+          document
+            ? {
+                uid,
+                shopId: document.id,
+                shopName: (document.data().name as string) ?? document.id,
+                error: null,
+              }
+            : {
+                uid,
+                shopId: null,
+                shopName: null,
+                error:
+                  "Ο λογαριασμός σου δεν είναι συνδεδεμένος με κατάστημα. " +
+                  "Ζήτα από τον διαχειριστή να ορίσει το πεδίο ownerUid στο κατάστημά σου.",
+              },
+        );
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
         console.error("[admin] Αποτυχία εύρεσης καταστήματος:", caught);
-        setError("Δεν ήταν δυνατή η φόρτωση του καταστήματος.");
-        setLoading(false);
+        setLookup({
+          uid,
+          shopId: null,
+          shopName: null,
+          error: "Δεν ήταν δυνατή η φόρτωση του καταστήματος.",
+        });
       });
 
     return () => {
       cancelled = true;
     };
-  }, [user, isAuthenticated, shopIdOverride]);
+  }, [uid, shopIdOverride]);
+
+  const currentLookup = lookup && lookup.uid === uid ? lookup : null;
+  const shopId = shopIdOverride ?? currentLookup?.shopId ?? null;
 
   /* ---------------------- 2. Ζωντανή ροή παραγγελιών -------------------- */
   useEffect(() => {
     if (!shopId) return;
-
-    setLoading(true);
-    firstSnapshotRef.current = true;
 
     const since = Timestamp.fromMillis(Date.now() - HOURS_WINDOW * 60 * 60 * 1000);
 
@@ -237,31 +151,54 @@ export function useAdminOrders(shopIdOverride?: string): UseAdminOrders {
     const unsubscribe = onSnapshot(
       ordersQuery,
       (snapshot) => {
-        setOrders(
-          snapshot.docs.map((document) =>
-            mapOrder(document.id, document.data() as Record<string, unknown>),
+        setStream({
+          shopId,
+          orders: snapshot.docs.map((document) =>
+            mapAdminOrder(document.id, document.data() as Record<string, unknown>),
           ),
-        );
-        firstSnapshotRef.current = false;
-        setError(null);
-        setLoading(false);
+          error: null,
+          loaded: true,
+        });
       },
       (caught) => {
         console.error("[admin] Σφάλμα ροής παραγγελιών:", caught);
-        setError(
+        const message =
           caught.code === "failed-precondition"
             ? "Λείπει το composite index (orders: shopId ASC + createdAt DESC). " +
-                "Δες τα logs για τον έτοιμο σύνδεσμο δημιουργίας."
+              "Δες τα logs για τον έτοιμο σύνδεσμο δημιουργίας."
             : caught.code === "permission-denied"
               ? "Δεν έχεις δικαίωμα πρόσβασης στις παραγγελίες αυτού του καταστήματος."
-              : "Χάθηκε η σύνδεση με τη βάση. Προσπάθεια επανασύνδεσης…",
-        );
-        setLoading(false);
+              : "Χάθηκε η σύνδεση με τη βάση. Προσπάθεια επανασύνδεσης…";
+
+        // Κρατάμε τις τελευταίες γνωστές παραγγελίες του ίδιου καταστήματος
+        setStream((previous) => ({
+          shopId,
+          orders: previous?.shopId === shopId ? previous.orders : [],
+          error: message,
+          loaded: true,
+        }));
       },
     );
 
     return unsubscribe;
   }, [shopId]);
+
+  const currentStream = stream && stream.shopId === shopId ? stream : null;
+  const orders = useMemo(() => currentStream?.orders ?? [], [currentStream]);
+
+  /* ------------------------ Φόρτωση / σφάλμα (παράγωγα) ----------------- */
+  let loading: boolean;
+  if (shopIdOverride) {
+    loading = !currentStream?.loaded;
+  } else if (!uid) {
+    loading = false;
+  } else if (!currentLookup) {
+    loading = true;
+  } else {
+    loading = currentLookup.shopId !== null && !currentStream?.loaded;
+  }
+
+  const error = (shopIdOverride ? null : currentLookup?.error) ?? currentStream?.error ?? null;
 
   /* --------------------------- 3. Ομαδοποίηση --------------------------- */
   const { pendingOrders, activeOrders, completedOrders } = useMemo(() => {
@@ -282,11 +219,7 @@ export function useAdminOrders(shopIdOverride?: string): UseAdminOrders {
     /* Οι νέες παραγγελίες: η παλαιότερη πρώτη — αυτή περιμένει περισσότερο */
     pending.reverse();
 
-    return {
-      pendingOrders: pending,
-      activeOrders: active,
-      completedOrders: completed,
-    };
+    return { pendingOrders: pending, activeOrders: active, completedOrders: completed };
   }, [orders]);
 
   /* ------------------------ 4. Αλλαγή κατάστασης ------------------------ */
@@ -308,7 +241,7 @@ export function useAdminOrders(shopIdOverride?: string): UseAdminOrders {
 
   return {
     shopId,
-    shopName,
+    shopName: shopIdOverride ? null : (currentLookup?.shopName ?? null),
     orders,
     pendingOrders,
     activeOrders,

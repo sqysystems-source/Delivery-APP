@@ -13,25 +13,32 @@
  *                             σελίδα του καταστήματος.
  *  3. <CartLines />, <CartSummary /> — τα κοινά κομμάτια που μοιράζονται.
  *
- *  Όλη η κατάσταση έρχεται από το useCart(): τα components εδώ δεν κρατούν
- *  δικό τους state πέρα από το πεδίο σχολίων.
+ *  Όλη η κατάσταση έρχεται από το useCart().
+ *
+ *  ── ΥΠΟΒΟΛΗ ─────────────────────────────────────────────────────────────
+ *  Το καλάθι ΔΕΝ υποβάλλει πια παραγγελία. Και στο κινητό (bottom sheet) και
+ *  στο desktop (CartPanel) το κουμπί οδηγεί στο /checkout, όπου ο πελάτης
+ *  συμπληρώνει στοιχεία, βλέπει τη σύνοψη και επιβεβαιώνει ρητά.
  * ========================================================================== */
 
 import { useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
+  AlertTriangle,
   ChevronRight,
-  Loader2,
   MapPin,
   Minus,
-  PartyPopper,
   Plus,
   ShoppingBag,
   Trash2,
-  AlertTriangle,
   X,
 } from "lucide-react";
 import { useCart } from "@/context/CartContext";
+import { CHECKOUT_LIMITS } from "@/lib/checkout/constants";
 import { cn, formatDeliveryFee, formatPrice } from "@/lib/format";
+
+const CHECKOUT_PATH = "/checkout";
 
 /* ==========================================================================
  *  1. GLOBAL OVERLAY
@@ -46,13 +53,16 @@ export default function CartDrawer() {
     openCart,
     closeCart,
     clearCart,
-    orderState,
     pendingItem,
     confirmPendingItem,
     cancelPendingItem,
   } = useCart();
+  const pathname = usePathname();
 
-  const showFloatingBar = hydrated && totals.itemCount > 0 && !isCartOpen;
+  /* Στο /checkout η σελίδα έχει δικό της κουμπί επιβεβαίωσης — η floating
+   * μπάρα θα το σκέπαζε και θα οδηγούσε στην ίδια σελίδα. */
+  const showFloatingBar =
+    hydrated && totals.itemCount > 0 && !isCartOpen && pathname !== CHECKOUT_PATH;
 
   return (
     <>
@@ -109,7 +119,7 @@ export default function CartDrawer() {
               </div>
 
               <div className="flex shrink-0 items-center gap-2">
-                {cart.lines.length > 0 && orderState !== "done" && (
+                {cart.lines.length > 0 && (
                   <button
                     type="button"
                     onClick={clearCart}
@@ -195,7 +205,7 @@ export default function CartDrawer() {
  * ========================================================================== */
 
 export function CartPanel({ className }: { className?: string }) {
-  const { cart, clearCart, orderState } = useCart();
+  const { cart, clearCart } = useCart();
 
   return (
     <div
@@ -215,7 +225,7 @@ export function CartPanel({ className }: { className?: string }) {
           )}
         </div>
 
-        {cart.lines.length > 0 && orderState !== "done" && (
+        {cart.lines.length > 0 && (
           <button
             type="button"
             onClick={clearCart}
@@ -240,52 +250,7 @@ export function CartPanel({ className }: { className?: string }) {
  * ========================================================================== */
 
 export function CartLines() {
-  const {
-    cart,
-    hydrated,
-    increase,
-    decrease,
-    removeLine,
-    orderState,
-    orderCode,
-    resetOrder,
-    closeCart,
-  } = useCart();
-
-  /* --------------------------- Επιτυχία ----------------------------- */
-  if (orderState === "done") {
-    return (
-      <div className="py-8 text-center">
-        <span className="mx-auto flex h-16 w-16 items-center justify-center rounded-3xl bg-emerald-100">
-          <PartyPopper className="h-8 w-8 text-emerald-600" />
-        </span>
-
-        <h3 className="mt-5 text-xl font-black tracking-tight text-gray-900">
-          Η παραγγελία καταχωρήθηκε!
-        </h3>
-        <p className="mt-2 text-sm leading-relaxed text-gray-600">
-          Το κατάστημα ενημερώθηκε και ετοιμάζει ήδη το φαγητό σου.
-        </p>
-
-        {orderCode && (
-          <p className="mt-4 inline-block rounded-full bg-gray-100 px-4 py-2 text-sm font-bold tracking-wider text-gray-700">
-            Κωδικός: {orderCode}
-          </p>
-        )}
-
-        <button
-          type="button"
-          onClick={() => {
-            resetOrder();
-            closeCart();
-          }}
-          className="mt-6 w-full rounded-full bg-gray-900 px-6 py-3.5 text-sm font-bold text-white transition-all duration-300 hover:scale-105 hover:bg-orange-500"
-        >
-          Νέα παραγγελία
-        </button>
-      </div>
-    );
-  }
+  const { cart, hydrated, increase, decrease, removeLine } = useCart();
 
   /* ----------------------- Φόρτωση από storage ---------------------- */
   if (!hydrated) {
@@ -347,8 +312,9 @@ export function CartLines() {
               <button
                 type="button"
                 onClick={() => increase(line.itemId)}
+                disabled={line.quantity >= CHECKOUT_LIMITS.maxQuantityPerLine}
                 aria-label={`Αύξηση ποσότητας για ${line.name}`}
-                className="flex h-7 w-7 items-center justify-center rounded-full bg-orange-500 text-white transition-colors hover:bg-orange-600"
+                className="flex h-7 w-7 items-center justify-center rounded-full bg-orange-500 text-white transition-colors hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-gray-300"
               >
                 <Plus className="h-3.5 w-3.5" />
               </button>
@@ -375,31 +341,35 @@ export function CartLines() {
 }
 
 /* ==========================================================================
- *  4. ΣΥΝΟΨΗ + CHECKOUT
+ *  4. ΣΥΝΟΨΗ + ΣΥΝΕΧΕΙΑ ΣΤΟ ΤΑΜΕΙΟ
  * ========================================================================== */
 
 export function CartSummary() {
-  const { cart, totals, address, orderState, placeOrder } = useCart();
-  const [notes, setNotes] = useState("");
+  const { cart, totals, deliveryAddress, orderNotes, setOrderNotes, closeCart } = useCart();
   const [showNotes, setShowNotes] = useState(false);
 
-  /* Δεν εμφανίζεται σε άδειο καλάθι ή μετά την επιτυχή παραγγελία */
-  if (cart.lines.length === 0 || orderState === "done") return null;
+  if (cart.lines.length === 0) return null;
 
-  const sending = orderState === "sending";
+  const notesOpen = showNotes || orderNotes.length > 0;
 
   return (
     <div className="border-t border-gray-100 bg-gray-50 px-5 py-4">
       {/* ------------------------- Σχόλια παραγγελίας ------------------- */}
-      {showNotes ? (
-        <textarea
-          value={notes}
-          onChange={(event) => setNotes(event.target.value)}
-          rows={2}
-          maxLength={200}
-          placeholder="π.χ. χωρίς κρεμμύδι, κουδούνι 2ος όροφος…"
-          className="mb-3 w-full resize-none rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-orange-400"
-        />
+      {notesOpen ? (
+        <div className="mb-3">
+          <label htmlFor="cart-order-notes" className="sr-only">
+            Σχόλια παραγγελίας
+          </label>
+          <textarea
+            id="cart-order-notes"
+            value={orderNotes}
+            onChange={(event) => setOrderNotes(event.target.value)}
+            rows={2}
+            maxLength={CHECKOUT_LIMITS.maxNotesLength}
+            placeholder="π.χ. χωρίς κρεμμύδι, έξτρα σάλτσα…"
+            className="w-full resize-none rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-orange-400"
+          />
+        </div>
       ) : (
         <button
           type="button"
@@ -414,9 +384,7 @@ export function CartSummary() {
       <div className="space-y-1.5 text-sm">
         <div className="flex items-center justify-between text-gray-600">
           <span>Υποσύνολο</span>
-          <span className="font-semibold text-gray-900">
-            {formatPrice(totals.subtotal)}
-          </span>
+          <span className="font-semibold text-gray-900">{formatPrice(totals.subtotal)}</span>
         </div>
 
         <div className="flex items-center justify-between text-gray-600">
@@ -433,53 +401,44 @@ export function CartSummary() {
 
         <div className="flex items-center justify-between border-t border-dashed border-gray-200 pt-2.5 text-base">
           <span className="font-bold text-gray-900">Σύνολο</span>
-          <span className="text-xl font-black text-gray-900">
-            {formatPrice(totals.total)}
-          </span>
+          <span className="text-xl font-black text-gray-900">{formatPrice(totals.total)}</span>
         </div>
       </div>
 
       {/* --------------------------- Διεύθυνση -------------------------- */}
-      <p className="mt-3 flex items-center gap-1.5 text-xs text-gray-500">
-        <MapPin className="h-3.5 w-3.5 shrink-0 text-orange-500" />
-        Παράδοση σε: <span className="font-semibold text-gray-700">{address}</span>
+      <p className="mt-3 flex items-start gap-1.5 text-xs text-gray-500">
+        <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-orange-500" />
+        {deliveryAddress ? (
+          <span>
+            Παράδοση σε:{" "}
+            <span className="font-semibold text-gray-700">
+              {deliveryAddress.street}
+              {deliveryAddress.city ? `, ${deliveryAddress.city}` : ""}
+            </span>
+          </span>
+        ) : (
+          <span>Τη διεύθυνση παράδοσης τη συμπληρώνεις στο επόμενο βήμα.</span>
+        )}
       </p>
 
       {/* ----------------------- Ελάχιστη παραγγελία -------------------- */}
-      {totals.missingForMinOrder > 0 && (
-        <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
-          Πρόσθεσε ακόμη {formatPrice(totals.missingForMinOrder)} για να φτάσεις την
-          ελάχιστη παραγγελία των {formatPrice(totals.minOrder)}.
-        </p>
-      )}
-
-      {/* ------------------------------ Σφάλμα -------------------------- */}
-      {orderState === "error" && (
-        <p className="mt-3 flex items-start gap-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">
+      {totals.missingForMinOrderCents > 0 && (
+        <p className="mt-3 flex items-start gap-2 rounded-xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          Κάτι πήγε στραβά με την αποστολή. Δοκίμασε ξανά σε λίγο.
+          Πρόσθεσε ακόμη {formatPrice(totals.missingForMinOrder)} για να φτάσεις την ελάχιστη
+          παραγγελία των {formatPrice(totals.minOrder)}.
         </p>
       )}
 
-      {/* ----------------------------- Checkout ------------------------- */}
-      <button
-        type="button"
-        onClick={() => placeOrder(notes.trim() || undefined)}
-        disabled={!totals.canCheckout || sending}
-        className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-orange-500 px-6 py-4 text-sm font-bold text-white shadow-lg shadow-orange-500/30 transition-all duration-300 hover:scale-[1.02] hover:bg-orange-600 active:scale-95 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:shadow-none disabled:hover:scale-100"
+      {/* ----------------------- Συνέχεια στο ταμείο -------------------- */}
+      <Link
+        href={CHECKOUT_PATH}
+        onClick={closeCart}
+        className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-orange-500 px-6 py-4 text-sm font-bold text-white shadow-lg shadow-orange-500/30 transition-all duration-300 hover:scale-[1.02] hover:bg-orange-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 active:scale-95"
       >
-        {sending ? (
-          <>
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Αποστολή…
-          </>
-        ) : (
-          <>
-            Ολοκλήρωση παραγγελίας
-            <ChevronRight className="h-4 w-4" />
-          </>
-        )}
-      </button>
+        Συνέχεια στο ταμείο
+        <ChevronRight className="h-4 w-4" />
+      </Link>
     </div>
   );
 }

@@ -1,59 +1,78 @@
 "use client";
 
 /* ==========================================================================
- *  Buka Delivery — components/Navbar.tsx   (ΕΝΗΜΕΡΩΜΕΝΟ με auth)
+ *  Buka Delivery — components/Navbar.tsx
  *
  *  Sticky header με logo, επιλογέα διεύθυνσης, κουμπί καλαθιού και το
  *  <UserMenu />, που αναλαμβάνει όλη τη λογική σύνδεσης/εγγραφής.
  *
- *  Νέο: αν ο χρήστης είναι συνδεδεμένος και έχει αποθηκευμένες διευθύνσεις
- *  στο προφίλ του, ο επιλογέας δείχνει ΕΚΕΙΝΕΣ αντί για τις προεπιλεγμένες.
+ *  ── ΔΙΕΥΘΥΝΣΕΙΣ ─────────────────────────────────────────────────────────
+ *  Ο επιλογέας δείχνει ΜΟΝΟ τις αποθηκευμένες διευθύνσεις του συνδεδεμένου
+ *  χρήστη. Η ετικέτα («Σπίτι») είναι για εμφάνιση· αυτό που επιλέγεται και
+ *  φτάνει στο checkout είναι η οδός και η πόλη. Διευθύνσεις χωρίς έγκυρη οδό
+ *  εμφανίζονται απενεργοποιημένες, ώστε να μη χαθεί ποτέ η πραγματική
+ *  διεύθυνση πίσω από μια ετικέτα.
+ *
+ *  Δεν υπάρχουν πια ενδεικτικές/προεπιλεγμένες διευθύνσεις: ο επισκέπτης
+ *  συμπληρώνει τη διεύθυνσή του στο checkout.
  * ========================================================================== */
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, MapPin, ShoppingBag } from "lucide-react";
+import { Check, ChevronDown, LogIn, MapPin, ShoppingBag } from "lucide-react";
 import UserMenu from "@/components/UserMenu";
 import { useAuth } from "@/context/AuthContext";
 import { useCart } from "@/context/CartContext";
-import { fetchAddresses } from "@/lib/data";
+import { cleanSingleLine, isUsableStreet } from "@/lib/checkout/validation";
 import { cn } from "@/lib/format";
+import type { UserAddress } from "@/lib/auth";
+
+type AddressOption = {
+  address: UserAddress;
+  usable: boolean;
+  title: string;
+  detail: string;
+};
 
 export default function Navbar() {
-  const { address, setAddress, totals, openCart, hydrated } = useCart();
-  const { profile } = useAuth();
+  const { deliveryAddress, selectDeliveryAddress, totals, openCart, hydrated } = useCart();
+  const { profile, user, isAuthenticated, openLogin } = useAuth();
 
-  const [defaultAddresses, setDefaultAddresses] = useState<string[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement | null>(null);
+  const mobileRef = useRef<HTMLDivElement | null>(null);
 
-  /* Προεπιλεγμένες διευθύνσεις (μέχρι να συνδεθεί ο χρήστης) */
-  useEffect(() => {
-    let cancelled = false;
-    fetchAddresses().then((data) => {
-      if (!cancelled) setDefaultAddresses(data);
+  /* Μόνο διευθύνσεις του ΤΡΕΧΟΝΤΟΣ χρήστη (το προφίλ ενημερώνεται ασύγχρονα) */
+  const options = useMemo<AddressOption[]>(() => {
+    if (!isAuthenticated || !user || !profile || profile.uid !== user.uid) return [];
+
+    return profile.addresses.map((address) => {
+      const street = cleanSingleLine(address.street);
+      const city = cleanSingleLine(address.city ?? "");
+      const label = cleanSingleLine(address.label);
+      const usable = isUsableStreet(street);
+      const location = [street, city].filter(Boolean).join(", ");
+
+      return {
+        address,
+        usable,
+        title: label || street || "Διεύθυνση",
+        detail: usable ? location : "Λείπει η οδός — συμπλήρωσέ τη στο ταμείο",
+      };
     });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  }, [isAuthenticated, user, profile]);
 
-  /* Οι διευθύνσεις του προφίλ έχουν προτεραιότητα */
-  const addresses = useMemo(() => {
-    const saved = profile?.addresses ?? [];
-    if (saved.length === 0) return defaultAddresses;
-
-    return saved.map((item) => item.label?.trim() || item.street);
-  }, [profile, defaultAddresses]);
-
-  /* Κλείσιμο dropdown με κλικ εκτός ή Escape */
+  /* Κλείσιμο dropdown με κλικ εκτός ή Escape.
+   * Ελέγχονται ΚΑΙ τα δύο containers (desktop + mobile): αλλιώς ένα πάτημα
+   * μέσα στη λίστα του κινητού έκλεινε τη λίστα πριν καταγραφεί η επιλογή. */
   useEffect(() => {
     if (!isOpen) return;
 
     const handleClick = (event: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setIsOpen(false);
-      }
+      const target = event.target as Node;
+      const inside =
+        dropdownRef.current?.contains(target) || mobileRef.current?.contains(target);
+      if (!inside) setIsOpen(false);
     };
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") setIsOpen(false);
@@ -69,27 +88,70 @@ export default function Navbar() {
 
   const itemCount = hydrated ? totals.itemCount : 0;
 
-  const addressList = (
-    <>
-      {addresses.map((item) => (
-        <button
-          key={item}
-          type="button"
-          onClick={() => {
-            setAddress(item);
-            setIsOpen(false);
-          }}
-          className="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-sm font-medium text-gray-700 transition-colors duration-200 hover:bg-orange-50 hover:text-orange-600"
-        >
-          <span className="flex min-w-0 items-center gap-2">
-            <MapPin className="h-4 w-4 shrink-0 text-gray-400" />
-            <span className="truncate">{item}</span>
-          </span>
-          {address === item && <Check className="h-4 w-4 shrink-0 text-orange-500" />}
-        </button>
-      ))}
-    </>
-  );
+  const chipTitle = deliveryAddress
+    ? deliveryAddress.label || deliveryAddress.street
+    : "Προσθήκη διεύθυνσης";
+  const chipDetail = deliveryAddress
+    ? [deliveryAddress.street, deliveryAddress.city].filter(Boolean).join(", ")
+    : null;
+
+  const chooseAddress = (option: AddressOption) => {
+    if (!option.usable || !user) return;
+    selectDeliveryAddress({
+      sourceId: option.address.id,
+      sourceUid: user.uid,
+      label: cleanSingleLine(option.address.label),
+      street: cleanSingleLine(option.address.street),
+      city: cleanSingleLine(option.address.city ?? ""),
+      ...(option.address.notes ? { instructions: option.address.notes.trim() } : {}),
+    });
+    setIsOpen(false);
+  };
+
+  const addressList =
+    options.length > 0 ? (
+      <ul className="space-y-0.5" role="listbox" aria-label="Αποθηκευμένες διευθύνσεις">
+        {options.map((option) => {
+          const selected = deliveryAddress?.sourceId === option.address.id;
+          return (
+            <li key={option.address.id} role="option" aria-selected={selected}>
+              <button
+                type="button"
+                onClick={() => chooseAddress(option)}
+                disabled={!option.usable}
+                className="flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2.5 text-left text-sm font-medium text-gray-700 transition-colors duration-200 hover:bg-orange-50 hover:text-orange-600 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent disabled:hover:text-gray-700"
+              >
+                <span className="flex min-w-0 items-start gap-2">
+                  <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" />
+                  <span className="min-w-0">
+                    <span className="block truncate font-semibold">{option.title}</span>
+                    <span className="block truncate text-xs text-gray-500">{option.detail}</span>
+                  </span>
+                </span>
+                {selected && <Check className="h-4 w-4 shrink-0 text-orange-500" />}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    ) : (
+      <div className="px-3 py-2 text-sm text-gray-600">
+        <p>Τη διεύθυνση παράδοσης τη συμπληρώνεις στο ταμείο.</p>
+        {!isAuthenticated && (
+          <button
+            type="button"
+            onClick={() => {
+              setIsOpen(false);
+              openLogin();
+            }}
+            className="mt-2 flex items-center gap-1.5 text-xs font-bold text-orange-600 transition-colors hover:text-orange-700"
+          >
+            <LogIn className="h-3.5 w-3.5" />
+            Σύνδεση για αποθηκευμένες διευθύνσεις
+          </button>
+        )}
+      </div>
+    );
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-gray-100 bg-white/85 backdrop-blur-xl">
@@ -120,9 +182,10 @@ export default function Navbar() {
               <span className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
                 Παράδοση σε
               </span>
-              <span className="truncate text-sm font-semibold text-gray-900">
-                {address}
-              </span>
+              <span className="truncate text-sm font-semibold text-gray-900">{chipTitle}</span>
+              {chipDetail && chipDetail !== chipTitle && (
+                <span className="mt-0.5 truncate text-[11px] text-gray-500">{chipDetail}</span>
+              )}
             </span>
             <ChevronDown
               className={cn(
@@ -133,11 +196,9 @@ export default function Navbar() {
           </button>
 
           {isOpen && (
-            <div className="absolute top-full z-50 mt-2 w-72 overflow-hidden rounded-2xl border border-gray-100 bg-white p-2 shadow-2xl shadow-gray-900/10">
+            <div className="absolute top-full z-50 mt-2 w-80 overflow-hidden rounded-2xl border border-gray-100 bg-white p-2 shadow-2xl shadow-gray-900/10">
               <p className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-                {profile && profile.addresses.length > 0
-                  ? "Οι διευθύνσεις μου"
-                  : "Δημοφιλείς περιοχές"}
+                Οι διευθύνσεις μου
               </p>
               {addressList}
             </div>
@@ -165,7 +226,7 @@ export default function Navbar() {
       </nav>
 
       {/* -------------------- Επιλογέας διεύθυνσης (mobile) ---------------- */}
-      <div className="border-t border-gray-100 px-4 py-2 md:hidden">
+      <div ref={mobileRef} className="border-t border-gray-100 px-4 py-2 md:hidden">
         <button
           type="button"
           onClick={() => setIsOpen((open) => !open)}
@@ -174,7 +235,9 @@ export default function Navbar() {
         >
           <MapPin className="h-4 w-4 shrink-0 text-orange-500" />
           <span className="text-xs text-gray-500">Παράδοση σε:</span>
-          <span className="truncate text-xs font-bold text-gray-900">{address}</span>
+          <span className="truncate text-xs font-bold text-gray-900">
+            {chipDetail ?? chipTitle}
+          </span>
           <ChevronDown
             className={cn(
               "ml-auto h-4 w-4 shrink-0 text-gray-400 transition-transform duration-300",
@@ -183,7 +246,7 @@ export default function Navbar() {
           />
         </button>
 
-        {isOpen && <div className="mt-2 space-y-1 pb-1">{addressList}</div>}
+        {isOpen && <div className="mt-2 pb-1">{addressList}</div>}
       </div>
     </header>
   );

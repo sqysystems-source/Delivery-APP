@@ -1,7 +1,7 @@
 "use client";
 
 /* ==========================================================================
- *  Buka Delivery — app/admin/orders/page.tsx
+ *  Buka Delivery — app/(admin)/admin/orders/page.tsx
  *
  *  Ταμπλό παραγγελιών για το tablet της ταμειακής. Kanban σε τρεις στήλες,
  *  ζωντανή ενημέρωση με onSnapshot, ηχητικός συναγερμός σε βρόχο.
@@ -21,6 +21,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Ban,
+  Banknote,
   Bell,
   BellOff,
   CheckCircle2,
@@ -29,16 +30,21 @@ import {
   Clock,
   Loader2,
   MapPin,
+  Phone,
   Play,
   Printer,
   Radio,
   RefreshCw,
   ShoppingBag,
+  UserRound,
   Volume2,
   X,
 } from "lucide-react";
 import { useAdminOrders, type AdminOrder } from "@/hooks/useAdminOrders";
 import { useOrderAlert } from "@/hooks/useOrderAlert";
+import { buildReceiptText } from "@/lib/admin/receipt";
+import { PAYMENT_METHOD_LABELS } from "@/lib/checkout/constants";
+import { formatPhoneForDisplay, phoneHref } from "@/lib/checkout/phone";
 import { cn, formatPrice } from "@/lib/format";
 import type { OrderStatus } from "@/types";
 
@@ -92,34 +98,8 @@ function countItems(order: AdminOrder): number {
  * -------------------------------------------------------------------------- */
 
 function printReceipt(order: AdminOrder): void {
-  const separator = "-".repeat(32);
-
-  const receipt = [
-    "      BUKA DELIVERY",
-    order.shopName,
-    separator,
-    `Κωδικός: ${order.code}`,
-    `Ώρα: ${clockTime(order.createdAt)}`,
-    `Διεύθυνση: ${order.address}`,
-    separator,
-    ...order.lines.map(
-      (line) =>
-        `${String(line.quantity).padStart(2, " ")}x ${line.name}`.padEnd(24, " ") +
-        formatPrice(line.lineTotal).padStart(8, " "),
-    ),
-    separator,
-    `Υποσύνολο:`.padEnd(24, " ") + formatPrice(order.subtotal).padStart(8, " "),
-    `Μεταφορικά:`.padEnd(24, " ") + formatPrice(order.deliveryFee).padStart(8, " "),
-    `ΣΥΝΟΛΟ:`.padEnd(24, " ") + formatPrice(order.total).padStart(8, " "),
-    separator,
-    order.notes ? `Σχόλιο: ${order.notes}` : "",
-    "",
-    "   Ευχαριστούμε!",
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  console.log("🖨️ [ESC/POS placeholder] Απόδειξη προς εκτύπωση:\n\n" + receipt);
+  // Το κείμενο (με πελάτη, παράδοση, πληρωμή) φτιάχνεται στο lib/admin/receipt.ts
+  console.log("🖨️ [ESC/POS placeholder] Απόδειξη προς εκτύπωση:\n\n" + buildReceiptText(order));
   console.log("🖨️ Πλήρες αντικείμενο παραγγελίας:", order);
 }
 
@@ -587,9 +567,16 @@ function OrderCard({
           </span>
         </div>
 
-        <p className="mt-2.5 flex items-start gap-1.5 text-sm text-gray-600">
+        {order.customer?.fullName && (
+          <p className="mt-2.5 flex items-start gap-1.5 text-sm font-semibold text-gray-800">
+            <UserRound className="mt-0.5 h-3.5 w-3.5 shrink-0 text-orange-500" />
+            <span className="line-clamp-1">{order.customer.fullName}</span>
+          </p>
+        )}
+
+        <p className="mt-1.5 flex items-start gap-1.5 text-sm text-gray-600">
           <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-orange-500" />
-          <span className="line-clamp-1">{order.address}</span>
+          <span className="line-clamp-1">{order.address || "—"}</span>
         </p>
 
         {order.notes && (
@@ -690,17 +677,7 @@ function OrderDetail({
 
         {/* Περιεχόμενο */}
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-          <div className="flex items-start gap-2 rounded-2xl bg-gray-50 p-4">
-            <MapPin className="mt-0.5 h-5 w-5 shrink-0 text-orange-500" />
-            <div>
-              <p className="text-xs font-bold uppercase tracking-wider text-gray-400">
-                Διεύθυνση παράδοσης
-              </p>
-              <p className="mt-0.5 text-base font-bold text-gray-900">
-                {order.address}
-              </p>
-            </div>
-          </div>
+          <CustomerDeliveryDetails order={order} />
 
           {order.notes && (
             <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
@@ -813,6 +790,138 @@ function OrderDetail({
           </div>
         </footer>
       </div>
+    </div>
+  );
+}
+
+/* ==========================================================================
+ *  ΣΤΟΙΧΕΙΑ ΠΕΛΑΤΗ / ΠΑΡΑΔΟΣΗΣ / ΠΛΗΡΩΜΗΣ
+ *
+ *  Οι παραγγελίες πριν από το schemaVersion 2 δεν έχουν δομημένα στοιχεία·
+ *  εκεί εμφανίζεται η συμβατή διεύθυνση και μια σαφής σημείωση.
+ * ========================================================================== */
+
+function CustomerDeliveryDetails({ order }: { order: AdminOrder }) {
+  const telephone = order.customer?.phone ? phoneHref(order.customer.phone) : null;
+
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      {/* ------------------------------- Πελάτης --------------------------- */}
+      <section
+        aria-labelledby={`customer-${order.id}`}
+        className="rounded-2xl bg-gray-50 p-4"
+      >
+        <h3
+          id={`customer-${order.id}`}
+          className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-gray-400"
+        >
+          <UserRound className="h-4 w-4 text-orange-500" aria-hidden="true" />
+          Πελάτης
+        </h3>
+
+        {order.customer ? (
+          <>
+            {order.customer.fullName && (
+              <p className="mt-1 text-base font-bold text-gray-900">{order.customer.fullName}</p>
+            )}
+            {order.customer.phone &&
+              (telephone ? (
+                <a
+                  href={telephone}
+                  aria-label={`Κλήση πελάτη στο ${formatPhoneForDisplay(order.customer.phone)}`}
+                  className="mt-2 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-base font-black text-white transition-colors hover:bg-emerald-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
+                >
+                  <Phone className="h-4 w-4" aria-hidden="true" />
+                  {formatPhoneForDisplay(order.customer.phone)}
+                </a>
+              ) : (
+                <p className="mt-1 text-sm font-semibold text-gray-700">
+                  Τηλ.: {order.customer.phone}
+                </p>
+              ))}
+            <p className="mt-2 text-[11px] text-gray-400">
+              Το τηλέφωνο το δήλωσε ο πελάτης — δεν έχει επαληθευτεί.
+            </p>
+          </>
+        ) : (
+          <p className="mt-1 text-sm text-gray-500">
+            Δεν καταγράφηκαν στοιχεία πελάτη (παλαιότερη παραγγελία).
+          </p>
+        )}
+      </section>
+
+      {/* ------------------------------ Παράδοση -------------------------- */}
+      <section
+        aria-labelledby={`delivery-${order.id}`}
+        className="rounded-2xl bg-gray-50 p-4"
+      >
+        <h3
+          id={`delivery-${order.id}`}
+          className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-gray-400"
+        >
+          <MapPin className="h-4 w-4 text-orange-500" aria-hidden="true" />
+          Διεύθυνση παράδοσης
+        </h3>
+
+        {order.delivery ? (
+          <>
+          <p className="mt-1 text-base font-bold text-gray-900">
+            {order.delivery.street}
+            {order.delivery.city ? `, ${order.delivery.city}` : ""}
+          </p>
+          <dl className="mt-0.5 space-y-0.5 text-sm text-gray-700">
+            {order.delivery.floor && (
+              <div className="flex gap-1.5">
+                <dt className="text-gray-500">Όροφος:</dt>
+                <dd className="font-semibold">{order.delivery.floor}</dd>
+              </div>
+            )}
+            {order.delivery.doorbell && (
+              <div className="flex gap-1.5">
+                <dt className="text-gray-500">Κουδούνι:</dt>
+                <dd className="font-semibold">{order.delivery.doorbell}</dd>
+              </div>
+            )}
+            {order.delivery.instructions && (
+              <div className="mt-1.5 rounded-xl bg-white px-3 py-2">
+                <dt className="text-xs font-bold text-gray-500">Οδηγίες για τον διανομέα</dt>
+                <dd className="mt-0.5 whitespace-pre-line text-sm font-semibold text-gray-800">
+                  {order.delivery.instructions}
+                </dd>
+              </div>
+            )}
+          </dl>
+          </>
+        ) : (
+          <p className="mt-1 text-base font-bold text-gray-900">{order.address || "—"}</p>
+        )}
+      </section>
+
+      {/* ------------------------------- Πληρωμή -------------------------- */}
+      <section
+        aria-labelledby={`payment-${order.id}`}
+        className="rounded-2xl bg-emerald-50 p-4 sm:col-span-2"
+      >
+        <h3
+          id={`payment-${order.id}`}
+          className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-emerald-700"
+        >
+          <Banknote className="h-4 w-4" aria-hidden="true" />
+          Πληρωμή
+        </h3>
+        {order.paymentMethod ? (
+          <p className="mt-1 text-base font-bold text-emerald-900">
+            {PAYMENT_METHOD_LABELS[order.paymentMethod]}
+            {order.paymentMethod === "cash_on_delivery" && (
+              <span className="font-semibold"> — είσπραξη {formatPrice(order.total)}</span>
+            )}
+          </p>
+        ) : (
+          <p className="mt-1 text-sm text-emerald-800">
+            Δεν καταγράφηκε τρόπος πληρωμής (παλαιότερη παραγγελία).
+          </p>
+        )}
+      </section>
     </div>
   );
 }
