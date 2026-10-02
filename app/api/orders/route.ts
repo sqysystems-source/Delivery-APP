@@ -16,7 +16,6 @@
  * ========================================================================== */
 
 import type { NextRequest } from "next/server";
-import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import {
   handleCheckoutRequest,
   methodNotAllowed,
@@ -24,8 +23,7 @@ import {
   type CheckoutDeps,
   type CheckoutHttpResult,
 } from "@/lib/server/checkout-service";
-import { createFirestoreCheckoutStore } from "@/lib/server/firestore-checkout-store";
-import { getAdminAuth, getAdminDb } from "@/lib/server/firebase-admin";
+import { createCheckoutDeps } from "@/lib/server/checkout-deps";
 import { CHECKOUT_LIMITS } from "@/lib/checkout/constants";
 
 export const runtime = "nodejs";
@@ -36,20 +34,6 @@ function respond(result: CheckoutHttpResult): Response {
     status: result.status,
     headers: { "Cache-Control": "no-store" },
   });
-}
-
-function createDeps(): CheckoutDeps {
-  const auth = getAdminAuth();
-  const db = getAdminDb();
-
-  return {
-    store: createFirestoreCheckoutStore(db),
-    verifyIdToken: (token) => auth.verifyIdToken(token),
-    serverTimestamp: () => FieldValue.serverTimestamp(),
-    timestampFromMillis: (ms) => Timestamp.fromMillis(ms),
-    now: () => Date.now(),
-    logger: console,
-  };
 }
 
 export async function POST(request: NextRequest): Promise<Response> {
@@ -64,7 +48,7 @@ export async function POST(request: NextRequest): Promise<Response> {
 
   let deps: CheckoutDeps;
   try {
-    deps = createDeps();
+    deps = createCheckoutDeps();
   } catch (error) {
     console.error("[orders] Σφάλμα αρχικοποίησης Admin SDK:", error);
     return respond(serverMisconfigured());

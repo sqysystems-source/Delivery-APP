@@ -40,7 +40,7 @@ import {
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 import { mapAdminOrder, type AdminOrder } from "@/lib/admin/order-mapper";
-import type { OrderStatus } from "@/types";
+import type { OrderCancelReason, OrderStatus } from "@/types";
 
 export type { AdminOrder, AdminOrderLine } from "@/lib/admin/order-mapper";
 
@@ -57,7 +57,15 @@ export type UseAdminOrders = {
   completedOrders: AdminOrder[];
   loading: boolean;
   error: string | null;
-  updateStatus: (orderId: string, status: OrderStatus) => Promise<void>;
+  /**
+   * Αλλαγή κατάστασης. Με status "cancelled" ΠΡΕΠΕΙ να δοθεί και ο λόγος
+   * (milestone 2), ώστε ο πελάτης να ξέρει αν απορρίφθηκε ή ακυρώθηκε.
+   */
+  updateStatus: (
+    orderId: string,
+    status: OrderStatus,
+    cancelReason?: OrderCancelReason,
+  ) => Promise<void>;
   updatingId: string | null;
 };
 
@@ -223,13 +231,17 @@ export function useAdminOrders(shopIdOverride?: string): UseAdminOrders {
   }, [orders]);
 
   /* ------------------------ 4. Αλλαγή κατάστασης ------------------------ */
-  const updateStatus = useCallback(async (orderId: string, status: OrderStatus) => {
+  const updateStatus = useCallback(
+    async (orderId: string, status: OrderStatus, cancelReason?: OrderCancelReason) => {
     setUpdatingId(orderId);
     try {
-      /* Τα Security Rules επιτρέπουν ΜΟΝΟ αυτά τα πεδία — κανένα οικονομικό */
+      /* Τα Security Rules επιτρέπουν ΜΟΝΟ αυτά τα πεδία — κανένα οικονομικό —
+       * και μόνο τις μεταβάσεις του ταμπλό (pending→accepted→…→completed,
+       * ή cancelled από μη τελική κατάσταση). */
       await updateDoc(doc(db, "orders", orderId), {
         status,
         updatedAt: serverTimestamp(),
+        ...(status === "cancelled" && cancelReason ? { cancelReason } : {}),
       });
     } catch (caught) {
       console.error("[admin] Αποτυχία αλλαγής κατάστασης:", caught);
@@ -237,7 +249,9 @@ export function useAdminOrders(shopIdOverride?: string): UseAdminOrders {
     } finally {
       setUpdatingId(null);
     }
-  }, []);
+    },
+    [],
+  );
 
   return {
     shopId,

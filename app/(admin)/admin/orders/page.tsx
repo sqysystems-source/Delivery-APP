@@ -42,6 +42,7 @@ import {
 } from "lucide-react";
 import { useAdminOrders, type AdminOrder } from "@/hooks/useAdminOrders";
 import { useOrderAlert } from "@/hooks/useOrderAlert";
+import { cancelReasonForStatus } from "@/lib/admin/order-mapper";
 import { buildReceiptText } from "@/lib/admin/receipt";
 import { PAYMENT_METHOD_LABELS } from "@/lib/checkout/constants";
 import { formatPhoneForDisplay, phoneHref } from "@/lib/checkout/phone";
@@ -145,6 +146,7 @@ type NavigatorWithWakeLock = Navigator & {
 export default function AdminOrdersPage() {
   const {
     shopName,
+    orders,
     pendingOrders,
     activeOrders,
     completedOrders,
@@ -226,8 +228,12 @@ export default function AdminOrdersPage() {
   /* ------------------------- Αλλαγή κατάστασης -------------------------- */
   const handleStatusChange = async (order: AdminOrder, status: OrderStatus) => {
     setActionError(null);
+    /* Ο λόγος ακύρωσης βγαίνει από την ΖΩΝΤΑΝΗ κατάσταση (όχι από αντίγραφο):
+     * ακύρωση πριν την αποδοχή = απόρριψη. Τον βλέπει ο πελάτης. */
+    const liveStatus = orders.find((entry) => entry.id === order.id)?.status ?? order.status;
+    const cancelReason = status === "cancelled" ? cancelReasonForStatus(liveStatus) : undefined;
     try {
-      await updateStatus(order.id, status);
+      await updateStatus(order.id, status, cancelReason);
       setSelected((current) =>
         current?.id === order.id ? { ...current, status } : current,
       );
@@ -237,6 +243,13 @@ export default function AdminOrdersPage() {
       );
     }
   };
+
+  /* Η καρτέλα λεπτομερειών δείχνει την ΖΩΝΤΑΝΗ εκδοχή της παραγγελίας (αλλαγές
+   * από άλλο tablet φαίνονται αμέσως)· αν βγει από το παράθυρο 24ω, μένει το
+   * τελευταίο αντίγραφο. */
+  const liveSelected = selected
+    ? (orders.find((entry) => entry.id === selected.id) ?? selected)
+    : null;
 
   /* ====================== ΟΘΟΝΗ ΕΝΑΡΞΗΣ ΒΑΡΔΙΑΣ ====================== */
   if (!armed) {
@@ -439,13 +452,13 @@ export default function AdminOrdersPage() {
       </main>
 
       {/* --------------------------- Λεπτομέρειες ------------------------- */}
-      {selected && (
+      {liveSelected && (
         <OrderDetail
-          order={selected}
+          order={liveSelected}
           now={now}
-          busy={updatingId === selected.id}
+          busy={updatingId === liveSelected.id}
           onClose={() => setSelected(null)}
-          onStatusChange={(status) => handleStatusChange(selected, status)}
+          onStatusChange={(status) => handleStatusChange(liveSelected, status)}
         />
       )}
     </div>
@@ -765,7 +778,11 @@ function OrderDetail({
               <button
                 type="button"
                 onClick={() => {
-                  if (window.confirm("Σίγουρα ακύρωση της παραγγελίας;")) {
+                  const question =
+                    order.status === "pending"
+                      ? "Σίγουρα απόρριψη της παραγγελίας; Ο πελάτης θα δει ότι δεν έγινε δεκτή."
+                      : "Σίγουρα ακύρωση της παραγγελίας; Ο πελάτης θα δει ότι ακυρώθηκε.";
+                  if (window.confirm(question)) {
                     onStatusChange("cancelled");
                   }
                 }}
@@ -773,7 +790,7 @@ function OrderDetail({
                 className="flex items-center justify-center gap-2 rounded-2xl border border-red-200 bg-white px-6 py-4 text-base font-bold text-red-600 transition-colors hover:bg-red-50 disabled:opacity-60"
               >
                 <Ban className="h-5 w-5" />
-                Ακύρωση
+                {order.status === "pending" ? "Απόρριψη" : "Ακύρωση"}
               </button>
             )}
 

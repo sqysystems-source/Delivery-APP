@@ -9,21 +9,36 @@
  *
  *  Το μήνυμα είναι σκόπιμα ακριβές: η παραγγελία ΣΤΑΛΘΗΚΕ και ΠΕΡΙΜΕΝΕΙ
  *  αποδοχή από το κατάστημα. Δεν λέμε ότι έγινε δεκτή, ούτε ότι πληρώθηκε.
+ *
+ *  Milestone 2:
+ *   • «Παρακολούθηση παραγγελίας» → /orders/{orderId} με το orderId του
+ *     SERVER. Η οθόνη μένει μέχρι ο πελάτης να επιλέξει πού θα πάει.
+ *   • `recovered`: η παραγγελία βρέθηκε μέσω ανάκτησης (π.χ. μετά από
+ *     ανανέωση). Η κατάσταση μπορεί να έχει ήδη αλλάξει, οπότε ΔΕΝ δείχνουμε
+ *     το στατικό «Σε αναμονή αποδοχής» — παραπέμπουμε στην παρακολούθηση.
  * ========================================================================== */
 
 import type { RefObject } from "react";
-import { Banknote, Clock3, MapPin, PartyPopper, Receipt } from "lucide-react";
+import Link from "next/link";
+import { Banknote, Clock3, MapPin, PartyPopper, Radio, Receipt } from "lucide-react";
 import type { CheckoutSuccess as CheckoutSuccessResult } from "@/types";
 import { PAYMENT_METHOD_LABELS } from "@/lib/checkout/constants";
 import { formatDeliveryFee, formatPrice } from "@/lib/format";
 
 type CheckoutSuccessProps = {
   result: CheckoutSuccessResult;
+  /** Βρέθηκε μέσω ανάκτησης προσπάθειας, όχι από την απάντηση αυτής της αποστολής */
+  recovered?: boolean;
   headingRef: RefObject<HTMLHeadingElement | null>;
   onContinue: () => void;
 };
 
-export default function CheckoutSuccess({ result, headingRef, onContinue }: CheckoutSuccessProps) {
+export default function CheckoutSuccess({
+  result,
+  recovered = false,
+  headingRef,
+  onContinue,
+}: CheckoutSuccessProps) {
   return (
     <div className="mx-auto w-full max-w-2xl px-4 py-10 sm:px-6">
       <div className="overflow-hidden rounded-3xl border border-gray-100 bg-white shadow-xl shadow-gray-900/5">
@@ -36,11 +51,12 @@ export default function CheckoutSuccess({ result, headingRef, onContinue }: Chec
             tabIndex={-1}
             className="mt-4 text-2xl font-black tracking-tight outline-none sm:text-3xl"
           >
-            Η παραγγελία στάλθηκε!
+            {recovered ? "Η παραγγελία σου είχε καταχωρηθεί" : "Η παραγγελία στάλθηκε!"}
           </h1>
           <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-orange-50">
-            Το κατάστημα «{result.shopName}» θα την επιβεβαιώσει σύντομα. Μέχρι τότε η
-            παραγγελία βρίσκεται σε αναμονή αποδοχής.
+            {recovered
+              ? `Η προηγούμενη αποστολή σου προς «${result.shopName}» είχε καταχωρηθεί κανονικά — δεν στάλθηκε δεύτερη παραγγελία. Δες την τρέχουσα κατάστασή της στην παρακολούθηση.`
+              : `Το κατάστημα «${result.shopName}» θα την επιβεβαιώσει σύντομα. Μέχρι τότε η παραγγελία βρίσκεται σε αναμονή αποδοχής.`}
           </p>
         </div>
 
@@ -49,10 +65,12 @@ export default function CheckoutSuccess({ result, headingRef, onContinue }: Chec
             <span className="rounded-full bg-gray-100 px-4 py-2 font-mono text-sm font-black tracking-wider text-gray-800">
               Κωδικός: {result.code}
             </span>
-            <span className="flex items-center gap-1.5 rounded-full bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800">
-              <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
-              Σε αναμονή αποδοχής
-            </span>
+            {!recovered && (
+              <span className="flex items-center gap-1.5 rounded-full bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800">
+                <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
+                Σε αναμονή αποδοχής
+              </span>
+            )}
           </div>
 
           <section aria-labelledby="success-items-heading">
@@ -103,21 +121,38 @@ export default function CheckoutSuccess({ result, headingRef, onContinue }: Chec
             </p>
             <p className="flex items-start gap-2 text-gray-700">
               <Banknote className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-hidden="true" />
-              <span>
-                {PAYMENT_METHOD_LABELS[result.paymentMethod]} — θα πληρώσεις{" "}
-                <span className="font-semibold text-gray-900">{formatPrice(result.total)}</span>{" "}
-                όταν παραλάβεις την παραγγελία.
-              </span>
+              {recovered ? (
+                /* Η κατάσταση μπορεί να έχει αλλάξει (π.χ. ακύρωση) — όχι «θα πληρώσεις» */
+                <span>
+                  {PAYMENT_METHOD_LABELS[result.paymentMethod]} — σύνολο{" "}
+                  <span className="font-semibold text-gray-900">{formatPrice(result.total)}</span>.
+                </span>
+              ) : (
+                <span>
+                  {PAYMENT_METHOD_LABELS[result.paymentMethod]} — θα πληρώσεις{" "}
+                  <span className="font-semibold text-gray-900">{formatPrice(result.total)}</span>{" "}
+                  όταν παραλάβεις την παραγγελία.
+                </span>
+              )}
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={onContinue}
-            className="w-full rounded-full bg-gray-900 px-6 py-4 text-sm font-bold text-white transition-all duration-300 hover:scale-[1.02] hover:bg-orange-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2"
-          >
-            Συνέχεια
-          </button>
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <Link
+              href={`/orders/${encodeURIComponent(result.orderId)}`}
+              className="flex flex-1 items-center justify-center gap-2 rounded-full bg-orange-500 px-6 py-4 text-sm font-bold text-white shadow-lg shadow-orange-500/30 transition-all duration-300 hover:scale-[1.02] hover:bg-orange-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2"
+            >
+              <Radio className="h-4 w-4" aria-hidden="true" />
+              Παρακολούθηση παραγγελίας
+            </Link>
+            <button
+              type="button"
+              onClick={onContinue}
+              className="flex-1 rounded-full bg-gray-900 px-6 py-4 text-sm font-bold text-white transition-all duration-300 hover:scale-[1.02] hover:bg-orange-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2"
+            >
+              Συνέχεια
+            </button>
+          </div>
         </div>
       </div>
     </div>

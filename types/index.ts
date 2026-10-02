@@ -285,6 +285,8 @@ export type CheckoutErrorCode =
   | "order_too_large"
   | "price_changed"
   | "idempotency_key_reused"
+  /** Το κλειδί έκλεισε μέσω /api/orders/recover — καμία παραγγελία (milestone 2) */
+  | "checkout_attempt_closed"
   | "shop_config_invalid"
   | "menu_config_invalid"
   | "server_misconfigured"
@@ -330,6 +332,20 @@ export type CheckoutErrorBody = {
 export type CheckoutResponseBody = CheckoutSuccess | CheckoutErrorBody;
 
 /* --------------------------------------------------------------------------
+ *  Ανάκτηση προσπάθειας — POST /api/orders/recover   (milestone 2)
+ *
+ *  Αίτημα: { idempotencyKey } + Bearer token. Ο server απαντά για τον uid του
+ *  token ΜΟΝΟ. Το "no_order" είναι οριστικό: το κλειδί κλείνει και κανένα
+ *  καθυστερημένο αίτημα με αυτό δεν δημιουργεί παραγγελία.
+ * -------------------------------------------------------------------------- */
+
+export type CheckoutRecoveryResult =
+  | { ok: true; outcome: "order_found"; order: CheckoutSuccess }
+  | { ok: true; outcome: "no_order" };
+
+export type CheckoutRecoveryResponseBody = CheckoutRecoveryResult | CheckoutErrorBody;
+
+/* --------------------------------------------------------------------------
  *  Παραγγελίες όπως αποθηκεύονται
  *  collection: `orders` — γράφεται ΜΟΝΟ από τον server (Admin SDK)
  * -------------------------------------------------------------------------- */
@@ -341,6 +357,14 @@ export type OrderStatus =
   | "delivering"
   | "completed"
   | "cancelled";
+
+/**
+ * Λόγος ακύρωσης — τον γράφει το ταμπλό μαζί με το status "cancelled"
+ * (milestone 2). Οι παλαιότερες ακυρωμένες παραγγελίες δεν τον έχουν.
+ *   rejected_by_shop  → ακυρώθηκε ΠΡΙΝ την αποδοχή (απόρριψη)
+ *   cancelled_by_shop → ακυρώθηκε ΜΕΤΑ την αποδοχή
+ */
+export type OrderCancelReason = "rejected_by_shop" | "cancelled_by_shop";
 
 export type StoredOrderLine = {
   itemId: string;
@@ -387,6 +411,7 @@ export type StoredOrder = {
   schemaVersion?: number;
   createdAt: OrderTimestamp | null;
   updatedAt?: OrderTimestamp | null;
+  cancelReason?: OrderCancelReason;
 };
 
 /** Παραγγελία όπως διαβάζεται πίσω από τη βάση */

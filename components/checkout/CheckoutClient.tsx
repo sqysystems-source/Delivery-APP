@@ -17,6 +17,20 @@
  *  • Αποτυχία: το καλάθι μένει ακριβώς όπως ήταν.
  *  • Αλλαγή τιμών: καμία παραγγελία· το καλάθι παίρνει τις νέες τιμές και ο
  *    πελάτης πρέπει να επιβεβαιώσει ξανά ρητά.
+ *
+ *  ── ΑΝΑΚΤΗΣΗ ΜΕΤΑ ΑΠΟ ΑΒΕΒΑΙΟΤΗΤΑ (milestone 2) ─────────────────────────
+ *  • Πριν φύγει κάθε αίτημα καταγράφεται ΜΟΝΟ { uid, κλειδί, ώρα } στο
+ *    localStorage (lib/checkout/checkout-attempt.ts) — κανένα προσωπικό στοιχείο.
+ *  • Ανανέωση σελίδας με ανεπίλυτη προσπάθεια του ΙΔΙΟΥ uid → η σελίδα ρωτά
+ *    το POST /api/orders/recover. ΔΕΝ ξαναστέλνει ποτέ αυτόματα παραγγελία.
+ *    Μέχρι να απαντήσει, η υποβολή είναι κλειδωμένη.
+ *      – βρέθηκε → οθόνη επιτυχίας με την ΑΡΧΙΚΗ παραγγελία
+ *      – δεν βρέθηκε → ο server ΚΛΕΙΝΕΙ το κλειδί (οριστικό), νέα υποβολή OK
+ *      – αποτυχία ελέγχου → «Έλεγχος ξανά», η υποβολή μένει κλειδωμένη
+ *  • Αλλαγή στοιχείων μετά από αβέβαιη αποτυχία → πρώτα ο ίδιος έλεγχος για
+ *    το παλιό κλειδί, και ΜΟΝΟ αν δεν υπάρχει παραγγελία φεύγει το νέο.
+ *  • Προσπάθεια άλλου uid ή παλαιότερη από 6 ημέρες → ρητή ειδοποίηση, χωρίς
+ *    αυτόματο έλεγχο.
  * ========================================================================== */
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
@@ -26,6 +40,7 @@ import {
   AlertTriangle,
   Banknote,
   ChevronLeft,
+  Info,
   Loader2,
   LogIn,
   MapPin,
@@ -42,6 +57,19 @@ import { useAuth } from "@/context/AuthContext";
 import { useCart } from "@/context/CartContext";
 import { useCheckoutForm } from "@/hooks/useCheckoutForm";
 import { snapshotCart, toRequestLines, type SubmittedCartSnapshot } from "@/lib/checkout/cart";
+import {
+  clearCheckoutAttempt,
+  clearCheckoutAttemptsExcept,
+  isAttemptExpired,
+  saveCheckoutAttempt,
+  useCheckoutAttempts,
+  type CheckoutAttempt,
+} from "@/lib/checkout/checkout-attempt";
+import {
+  recoverCheckoutAttempt,
+  type RecoverAttemptOutcome,
+} from "@/lib/checkout/recover-attempt";
+import { saveLastOrder } from "@/lib/orders/last-order";
 import { CHECKOUT_LIMITS, PAYMENT_METHOD_LABELS } from "@/lib/checkout/constants";
 import {
   requestFingerprint,
@@ -50,6 +78,7 @@ import {
 } from "@/lib/checkout/idempotency";
 import { centsToEuros } from "@/lib/checkout/money";
 import { CheckoutError, submitOrder } from "@/lib/checkout/submit-order";
+import { auth } from "@/lib/firebase";
 import {
   CHECKOUT_FORM_FIELDS,
   buildDeliveryFromForm,
@@ -65,6 +94,50 @@ import type {
   CheckoutRequest,
   CheckoutSuccess as CheckoutSuccessResult,
 } from "@/types";
+
+/** Αποτέλεσμα ελέγχου μιας αποθηκευμένης προσπάθειας (κλειδωμένο σε uid+κλειδί) */
+type RecoveryCheck = {
+  uid: string;
+  key: string;
+  kind: "failed";
+  message: string;
+};
+
+/** Ειδοποίηση που μένει ορατή αφού λυθεί/σβηστεί η προσπάθεια */
+type RecoveryNotice = {
+  uid: string;
+  kind: "no_order" | "expired" | "invalid";
+};
+
+const RECOVERY_NOTICE_TEXT: Record<RecoveryNotice["kind"], string> = {
+  no_order:
+    "Ελέγξαμε την προηγούμενη προσπάθειά σου: δεν είχε καταχωρηθεί παραγγελία, και πλέον δεν μπορεί να καταχωρηθεί. Συμπλήρωσε τα στοιχεία και επιβεβαίωσε ξανά.",
+  expired:
+    "Βρέθηκε παλιά προσπάθεια παραγγελίας (πάνω από 6 ημέρες) που δεν μπορεί πια να ελεγχθεί αυτόματα. Αν δεν είσαι σίγουρος/η αν καταχωρήθηκε, δες τις παραγγελίες σου ή επικοινώνησε με το κατάστημα πριν παραγγείλεις ξανά.",
+  invalid:
+    "Δεν ήταν δυνατός ο έλεγχος μιας προηγούμενης προσπάθειας παραγγελίας. Αν δεν είσαι σίγουρος/η αν καταχωρήθηκε, δες τις παραγγελίες σου πριν παραγγείλεις ξανά.",
+};
+
+/** Ελέγχει μια αποθηκευμένη προσπάθεια — ΠΟΤΕ δεν στέλνει παραγγελία */
+async function resolveStoredAttempt(
+  attempt: CheckoutAttempt,
+): Promise<RecoverAttemptOutcome | { kind: "expired" }> {
+  if (isAttemptExpired(attempt, Date.now())) return { kind: "expired" };
+  return recoverCheckoutAttempt(attempt);
+}
+
+/** Στιγμιότυπο καλαθιού από τις γραμμές που ΕΠΑΛΗΘΕΥΣΕ ο server */
+function snapshotFromResult(result: CheckoutSuccessResult): SubmittedCartSnapshot {
+  return {
+    shopId: result.shopId,
+    lines: result.lines.map((line) => ({
+      itemId: line.itemId,
+      name: line.name,
+      unitPrice: line.unitPrice,
+      quantity: line.quantity,
+    })),
+  };
+}
 
 type FocusTarget =
   | { kind: "field"; id: string }
@@ -117,7 +190,8 @@ export default function CheckoutClient() {
     applyQuote,
     completeSubmittedOrder,
   } = useCart();
-  const { user, profile, isAuthenticated, openLogin } = useAuth();
+  const { user, profile, isAuthenticated, openLogin, loading: authLoading } = useAuth();
+  const uid = user?.uid ?? null;
 
   const form = useCheckoutForm({
     uid: user?.uid ?? null,
@@ -131,9 +205,17 @@ export default function CheckoutClient() {
   const [submitError, setSubmitError] = useState<CheckoutError | null>(null);
   const [priceNotice, setPriceNotice] = useState<PriceChangeNotice | null>(null);
   const [focusRequest, setFocusRequest] = useState<FocusTarget | null>(null);
+  const [recovered, setRecovered] = useState(false);
+  /** Κλειδιά που δημιούργησε ΑΥΤΗ η σελίδα — τα χειρίζεται η ίδια, όχι ο έλεγχος φόρτωσης */
+  const [pageKeys, setPageKeys] = useState<readonly string[]>([]);
+  const [recoveryCheck, setRecoveryCheck] = useState<RecoveryCheck | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = useState<RecoveryNotice | null>(null);
+  const [recheckToken, setRecheckToken] = useState(0);
 
   const submittingRef = useRef(false);
   const keyRef = useRef<IdempotencyKeyState | null>(null);
+  /** Κλειδί με αβέβαιο αποτέλεσμα σε αυτή τη σελίδα + ο uid που το έστειλε */
+  const uncertainRef = useRef<{ uid: string | null; key: string } | null>(null);
   const formRef = useRef<HTMLFormElement | null>(null);
   const alertRef = useRef<HTMLDivElement | null>(null);
   const priceNoticeRef = useRef<HTMLDivElement | null>(null);
@@ -158,6 +240,79 @@ export default function CheckoutClient() {
     }
   }, [focusRequest]);
 
+  /* ----------------- Αποθηκευμένες προσπάθειες (ανανέωση) ----------------- */
+  const attempts = useCheckoutAttempts();
+  const ownAttempt =
+    hydrated && !authLoading && uid ? (attempts.find((entry) => entry.uid === uid) ?? null) : null;
+  /** Προσπάθεια από ΠΡΙΝ τη φόρτωση της σελίδας, που περιμένει έλεγχο */
+  const storedAttempt = ownAttempt && !pageKeys.includes(ownAttempt.key) ? ownAttempt : null;
+  /* Προσπάθειες άλλης σύνδεσης (όχι όσες έστειλε αυτή η σελίδα — π.χ. νέος
+   * ανώνυμος uid που δεν έχει φτάσει ακόμη στο AuthContext) */
+  const otherAccountAttempts =
+    hydrated && !authLoading
+      ? attempts.filter((entry) => entry.uid !== uid && !pageKeys.includes(entry.key))
+      : [];
+  const currentCheck =
+    storedAttempt && recoveryCheck?.uid === storedAttempt.uid && recoveryCheck.key === storedAttempt.key
+      ? recoveryCheck
+      : null;
+  /** idle: τίποτα να ελεγχθεί · checking: περιμένουμε τον server · failed: άγνωστο */
+  const recoveryPhase: "idle" | "checking" | "failed" = storedAttempt
+    ? (currentCheck?.kind ?? "checking")
+    : "idle";
+  const visibleNotice = recoveryNotice && recoveryNotice.uid === uid ? recoveryNotice : null;
+
+  const storedKey = storedAttempt?.key ?? null;
+  const storedUid = storedAttempt?.uid ?? null;
+  const storedStartedAt = storedAttempt?.startedAt ?? 0;
+
+  useEffect(() => {
+    if (!storedKey || !storedUid) return;
+    const attempt: CheckoutAttempt = { uid: storedUid, key: storedKey, startedAt: storedStartedAt };
+    let cancelled = false;
+
+    void resolveStoredAttempt(attempt).then((outcome) => {
+      if (cancelled) return;
+      switch (outcome.kind) {
+        case "order_found":
+          clearCheckoutAttempt(attempt.uid, attempt.key);
+          saveLastOrder({ uid: attempt.uid, orderId: outcome.order.orderId, savedAt: Date.now() });
+          completeSubmittedOrder(snapshotFromResult(outcome.order));
+          setRecovered(true);
+          setSuccess(outcome.order);
+          setFocusRequest({ kind: "success" });
+          break;
+        case "no_order":
+        case "expired":
+        case "invalid":
+          clearCheckoutAttempt(attempt.uid, attempt.key);
+          setRecoveryNotice({ uid: attempt.uid, kind: outcome.kind });
+          break;
+        case "identity_mismatch":
+          // Ο συνδεδεμένος χρήστης άλλαξε ενώ ελέγχαμε — ο νέος έλεγχος θα ξεκινήσει μόνος του
+          setRecoveryCheck({
+            uid: attempt.uid,
+            key: attempt.key,
+            kind: "failed",
+            message: "Η σύνδεση άλλαξε κατά τον έλεγχο. Πάτα «Έλεγχος ξανά».",
+          });
+          break;
+        case "failed":
+          setRecoveryCheck({ uid: attempt.uid, key: attempt.key, kind: "failed", message: outcome.message });
+          break;
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [storedKey, storedUid, storedStartedAt, recheckToken, completeSubmittedOrder]);
+
+  const recheckStoredAttempt = () => {
+    setRecoveryCheck(null);
+    setRecheckToken((value) => value + 1);
+  };
+
   const savedAddresses = useMemo(() => {
     if (!isAuthenticated || !user || !profile || profile.uid !== user.uid) return [];
     return profile.addresses.filter((address) => isUsableStreet(address.street));
@@ -173,6 +328,8 @@ export default function CheckoutClient() {
 
     // Συγχρονος φραγμός: κανένα δεύτερο αίτημα όσο τρέχει το πρώτο
     if (submittingRef.current) return;
+    // Ανεπίλυτη προσπάθεια από πριν την ανανέωση: πρώτα ο έλεγχος
+    if (recoveryPhase !== "idle") return;
 
     const snapshot = snapshotCart(cart);
     if (!hydrated || !snapshot) return;
@@ -208,20 +365,91 @@ export default function CheckoutClient() {
 
     /* 3. Κλειδί: ίδιο για ίδιο αίτημα, νέο για οτιδήποτε άλλαξε */
     const keyState = resolveKeyForSubmission(keyRef.current, requestFingerprint(request));
-    keyRef.current = keyState;
 
     const submittedDeliveryFee = totals.deliveryFee;
     submittingRef.current = true;
     setSubmitting(true);
 
     try {
-      const result = await submitOrder({ ...request, idempotencyKey: keyState.key });
+      /* 4. Αβέβαιο προηγούμενο κλειδί και ΝΕΟ κλειδί τώρα (άλλαξε κάτι): πρώτα
+       *    μαθαίνουμε αν το παλιό δημιούργησε παραγγελία. Ποτέ τυφλά νέα. */
+      const outstanding = uncertainRef.current;
+      if (outstanding && outstanding.key !== keyState.key) {
+        const outstandingUid = outstanding.uid ?? uid;
+        const outcome: RecoverAttemptOutcome = outstandingUid
+          ? await recoverCheckoutAttempt({ uid: outstandingUid, key: outstanding.key })
+          : { kind: "identity_mismatch" };
 
-      completeSubmittedOrder(snapshot);
-      keyRef.current = null; // η επόμενη παραγγελία ξεκινά με νέο κλειδί
-      setPriceNotice(null);
-      setSuccess(result);
-      setFocusRequest({ kind: "success" });
+        if (outcome.kind === "order_found") {
+          uncertainRef.current = null;
+          keyRef.current = null;
+          if (outstandingUid) clearCheckoutAttempt(outstandingUid, outstanding.key);
+          showSuccess(outcome.order, snapshotFromResult(outcome.order), outstandingUid, true);
+          return;
+        }
+        if (outcome.kind === "no_order") {
+          uncertainRef.current = null;
+          if (outstandingUid) clearCheckoutAttempt(outstandingUid, outstanding.key);
+        } else if (outcome.kind === "identity_mismatch") {
+          // Άλλη σύνδεση: το παλιό κλειδί δεν ελέγχεται από εδώ. Ενημερώνουμε ρητά.
+          uncertainRef.current = null;
+          setSubmitError(
+            new CheckoutError({
+              code: "auth_failed",
+              status: 0,
+              uncertain: false,
+              message:
+                "Η σύνδεσή σου άλλαξε μετά την προηγούμενη αβέβαιη αποστολή, οπότε δεν μπορούμε να ελέγξουμε αν εκείνη καταχωρήθηκε. Έλεγξε τις παραγγελίες του προηγούμενου λογαριασμού πριν συνεχίσεις· αν θέλεις να παραγγείλεις, πάτα ξανά «Ολοκλήρωση παραγγελίας».",
+            }),
+          );
+          setFocusRequest({ kind: "alert" });
+          return;
+        } else {
+          setSubmitError(
+            new CheckoutError({
+              code: "network_error",
+              status: 0,
+              uncertain: true,
+              message:
+                "Δεν μπορέσαμε να ελέγξουμε αν καταχωρήθηκε η προηγούμενη αποστολή, γι' αυτό ΔΕΝ στείλαμε νέα παραγγελία. Έλεγξε τη σύνδεσή σου και δοκίμασε ξανά.",
+            }),
+          );
+          setFocusRequest({ kind: "alert" });
+          return;
+        }
+      }
+
+      keyRef.current = keyState;
+      setPageKeys((previous) =>
+        previous.includes(keyState.key) ? previous : [...previous, keyState.key],
+      );
+
+      let sentUid: string | null = null;
+      try {
+        const result = await submitOrder(
+          { ...request, idempotencyKey: keyState.key },
+          {
+            onBeforeSend: (senderUid) => {
+              sentUid = senderUid;
+              saveCheckoutAttempt({ uid: senderUid, key: keyState.key, startedAt: Date.now() });
+            },
+          },
+        );
+
+        if (sentUid) clearCheckoutAttempt(sentUid, keyState.key);
+        uncertainRef.current = null;
+        keyRef.current = null; // η επόμενη παραγγελία ξεκινά με νέο κλειδί
+        showSuccess(result, snapshot, sentUid ?? auth.currentUser?.uid ?? uid, false);
+      } catch (caught) {
+        if (!(caught instanceof CheckoutError) || caught.uncertain) {
+          uncertainRef.current = { uid: sentUid, key: keyState.key };
+        } else {
+          /* Οριστική απάντηση: με αυτό το κλειδί ΔΕΝ υπάρχει παραγγελία */
+          if (sentUid) clearCheckoutAttempt(sentUid, keyState.key);
+          if (uncertainRef.current?.key === keyState.key) uncertainRef.current = null;
+        }
+        throw caught;
+      }
     } catch (caught) {
       const error =
         caught instanceof CheckoutError
@@ -239,6 +467,21 @@ export default function CheckoutClient() {
       submittingRef.current = false;
       setSubmitting(false);
     }
+  };
+
+  const showSuccess = (
+    result: CheckoutSuccessResult,
+    submitted: SubmittedCartSnapshot,
+    ownerUid: string | null,
+    wasRecovered: boolean,
+  ) => {
+    completeSubmittedOrder(submitted);
+    if (ownerUid) saveLastOrder({ uid: ownerUid, orderId: result.orderId, savedAt: Date.now() });
+    setPriceNotice(null);
+    setSubmitError(null);
+    setRecovered(wasRecovered);
+    setSuccess(result);
+    setFocusRequest({ kind: "success" });
   };
 
   const handleSubmitError = (
@@ -262,7 +505,7 @@ export default function CheckoutClient() {
       applyQuote(error.quote);
     }
 
-    if (error.code === "idempotency_key_reused") {
+    if (error.code === "idempotency_key_reused" || error.code === "checkout_attempt_closed") {
       keyRef.current = null;
     }
 
@@ -288,6 +531,7 @@ export default function CheckoutClient() {
     return (
       <CheckoutSuccess
         result={success}
+        recovered={recovered}
         headingRef={successHeadingRef}
         onContinue={() => router.push("/")}
       />
@@ -335,7 +579,11 @@ export default function CheckoutClient() {
   /* ================================ ΦΟΡΜΑ ================================ */
 
   const { values, errors } = form;
-  const canSubmit = !submitting && totals.missingForMinOrderCents === 0 && !totals.exceedsMaxOrder;
+  const canSubmit =
+    !submitting &&
+    recoveryPhase === "idle" &&
+    totals.missingForMinOrderCents === 0 &&
+    !totals.exceedsMaxOrder;
   const errorItemInCart =
     submitError?.itemId && cart.lines.some((line) => line.itemId === submitError.itemId)
       ? submitError.itemId
@@ -379,8 +627,83 @@ export default function CheckoutClient() {
 
         {/* Ανακοίνωση για αναγνώστες οθόνης */}
         <p className="sr-only" role="status" aria-live="polite">
-          {submitting ? "Αποστολή παραγγελίας…" : ""}
+          {submitting
+            ? "Αποστολή παραγγελίας…"
+            : recoveryPhase === "checking"
+              ? "Έλεγχος προηγούμενης παραγγελίας…"
+              : ""}
         </p>
+
+        {/* ------------- Ανάκτηση προσπάθειας μετά από ανανέωση ------------- */}
+        {recoveryPhase === "checking" && (
+          <div
+            className="mt-5 flex items-start gap-3 rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900"
+            aria-busy="true"
+          >
+            <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
+            <p className="leading-relaxed">
+              <span className="font-bold">Ελέγχουμε αν καταχωρήθηκε η προηγούμενη παραγγελία σου…</span>{" "}
+              Η προηγούμενη αποστολή δεν επιβεβαιώθηκε πριν φύγεις από τη σελίδα. Δεν θα σταλεί
+              τίποτα ξανά χωρίς να το επιβεβαιώσεις εσύ.
+            </p>
+          </div>
+        )}
+
+        {recoveryPhase === "failed" && currentCheck && (
+          <div
+            role="alert"
+            className="mt-5 rounded-3xl border border-amber-300 bg-amber-50 p-5 text-sm text-amber-900"
+          >
+            <p className="flex items-start gap-2 font-semibold leading-relaxed">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>{currentCheck.message}</span>
+            </p>
+            <p className="mt-2 text-xs leading-relaxed">
+              Μέχρι να ολοκληρωθεί ο έλεγχος, η νέα υποβολή είναι κλειδωμένη, ώστε να μη
+              δημιουργηθεί διπλή παραγγελία.
+            </p>
+            <button
+              type="button"
+              onClick={recheckStoredAttempt}
+              className="mt-3 flex items-center gap-1.5 rounded-full bg-amber-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-amber-700"
+            >
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+              Έλεγχος ξανά
+            </button>
+          </div>
+        )}
+
+        {visibleNotice && recoveryPhase === "idle" && (
+          <div
+            role="status"
+            className="mt-5 flex items-start gap-3 rounded-3xl border border-sky-200 bg-sky-50 p-5 text-sm text-sky-900"
+          >
+            <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <p className="leading-relaxed">{RECOVERY_NOTICE_TEXT[visibleNotice.kind]}</p>
+          </div>
+        )}
+
+        {otherAccountAttempts.length > 0 && (
+          <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-5 text-sm text-gray-700">
+            <p className="flex items-start gap-2 leading-relaxed">
+              <Info className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" aria-hidden="true" />
+              <span>
+                Σε αυτόν τον browser υπάρχει ανεπιβεβαίωτη προσπάθεια παραγγελίας από{" "}
+                <span className="font-semibold">άλλη σύνδεση</span>. Δεν μπορούμε να ελέγξουμε αν
+                καταχωρήθηκε χωρίς εκείνη τη σύνδεση. Αν ήταν δική σου με λογαριασμό, συνδέσου ξανά
+                σε εκείνον πριν παραγγείλεις ξανά. Αν ήταν παραγγελία επισκέπτη, επικοινώνησε με το
+                κατάστημα.
+              </span>
+            </p>
+            <button
+              type="button"
+              onClick={() => clearCheckoutAttemptsExcept(uid)}
+              className="mt-3 rounded-full border border-gray-200 px-4 py-2 text-xs font-bold text-gray-700 transition-colors hover:bg-gray-50"
+            >
+              Κατάλαβα
+            </button>
+          </div>
+        )}
 
         <form
           ref={formRef}
@@ -623,7 +946,13 @@ export default function CheckoutClient() {
                   {submitError.existingOrder && (
                     <p className="mt-2 text-xs">
                       Υπάρχει ήδη καταχωρημένη παραγγελία με κωδικό{" "}
-                      <strong className="font-mono">{submitError.existingOrder.code}</strong>.
+                      <strong className="font-mono">{submitError.existingOrder.code}</strong>.{" "}
+                      <Link
+                        href={`/orders/${submitError.existingOrder.orderId}`}
+                        className="font-bold underline underline-offset-2"
+                      >
+                        Παρακολούθηση παραγγελίας
+                      </Link>
                     </p>
                   )}
 
@@ -652,7 +981,8 @@ export default function CheckoutClient() {
                         Δοκίμασε ξανά
                       </button>
                       <p className="mt-2 text-xs">
-                        Αν αλλάξεις κάτι πριν ξαναδοκιμάσεις, θα σταλεί ως νέα παραγγελία.
+                        Αν αλλάξεις κάτι πριν ξαναδοκιμάσεις, θα ελέγξουμε πρώτα αν καταχωρήθηκε η
+                        προηγούμενη αποστολή — δεν θα δημιουργηθεί διπλή παραγγελία.
                       </p>
                     </>
                   )}

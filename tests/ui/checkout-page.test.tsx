@@ -56,11 +56,21 @@ vi.mock("@/context/AuthContext", () => ({
   }),
 }));
 
-const submitOrderMock = vi.fn<(request: CheckoutRequest) => Promise<CheckoutSuccess>>();
+type SubmitOptions = { onBeforeSend?: (uid: string) => void };
+const submitOrderMock = vi.fn<(request: CheckoutRequest, options?: SubmitOptions) => Promise<CheckoutSuccess>>();
 vi.mock("@/lib/checkout/submit-order", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/checkout/submit-order")>();
-  return { ...actual, submitOrder: (request: CheckoutRequest) => submitOrderMock(request) };
+  return {
+    ...actual,
+    submitOrder: (request: CheckoutRequest, options?: SubmitOptions) => submitOrderMock(request, options),
+  };
 });
+
+/* Milestone 2: έλεγχος αβέβαιης προσπάθειας — ψεύτικος, ο server δοκιμάζεται χωριστά */
+const recoverMock = vi.fn<(attempt: { uid: string; key: string }) => Promise<unknown>>();
+vi.mock("@/lib/checkout/recover-attempt", () => ({
+  recoverCheckoutAttempt: (attempt: { uid: string; key: string }) => recoverMock(attempt),
+}));
 
 import CheckoutClient from "@/components/checkout/CheckoutClient";
 import { CartProvider } from "@/context/CartContext";
@@ -158,6 +168,8 @@ async function submit() {
 beforeEach(() => {
   window.localStorage.clear();
   submitOrderMock.mockReset();
+  recoverMock.mockReset();
+  recoverMock.mockResolvedValue({ kind: "no_order" });
   push.mockReset();
   authState.user = null;
   authState.profile = null;
@@ -326,10 +338,13 @@ describe("σελίδα checkout", () => {
     expect(await screen.findByRole("heading", { name: /Η παραγγελία στάλθηκε/ })).toBeTruthy();
   });
 
-  it("αλλαγή στοιχείων μετά από αποτυχία → ΝΕΟ κλειδί", async () => {
+  it("αλλαγή στοιχείων μετά από αβέβαιη αποτυχία → πρώτα έλεγχος του παλιού κλειδιού, μετά ΝΕΟ κλειδί", async () => {
     seedCart();
     submitOrderMock
-      .mockRejectedValueOnce(new CheckoutError({ code: "network_error", status: 0, message: "…", uncertain: true }))
+      .mockImplementationOnce(async (_request, options) => {
+        options?.onBeforeSend?.("guest-uid");
+        throw new CheckoutError({ code: "network_error", status: 0, message: "…", uncertain: true });
+      })
       .mockResolvedValueOnce(successFrom(quote(8.5)));
 
     renderCheckout();
@@ -339,6 +354,9 @@ describe("σελίδα checkout", () => {
     await submit();
 
     const [first, second] = submitOrderMock.mock.calls.map(([request]) => request);
+    // Ο έλεγχος έγινε για το ΠΑΛΙΟ κλειδί, με τον uid που το έστειλε, πριν φύγει το νέο
+    expect(recoverMock).toHaveBeenCalledTimes(1);
+    expect(recoverMock).toHaveBeenCalledWith({ uid: "guest-uid", key: first.idempotencyKey });
     expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
   });
 

@@ -1,11 +1,16 @@
 /* ==========================================================================
  *  Buka Delivery — vitest.config.mts
  *
- *  Ρύθμιση όπως στον οδηγό Vitest της τεκμηρίωσης του Next.js 16
- *  (node_modules/next/dist/docs/01-app/02-guides/testing/vitest.md).
+ *  Written for the versions in package-lock.json (vitest 3.2.x, vite 6,
+ *  @vitejs/plugin-react 4, vite-tsconfig-paths 5).
  *
- *  Προεπιλογή: περιβάλλον Node. Τα tests του UI δηλώνουν στην πρώτη γραμμή
- *  `// @vitest-environment jsdom`.
+ *  • Default environment: node. UI tests opt into jsdom with the
+ *    `// @vitest-environment jsdom` docblock at the top of the file.
+ *  • `server-only` is a Next.js marker package (Next bundles its own copy);
+ *    outside Next it doesn't resolve, so tests use an empty stub.
+ *  • Firestore Emulator rules tests live in tests/emulator/*.emulator.ts and
+ *    are NOT matched here — they run only via `npm run test:rules`
+ *    (vitest.emulator.config.mts) inside `firebase emulators:exec`.
  * ========================================================================== */
 
 import { fileURLToPath } from "node:url";
@@ -17,13 +22,12 @@ export default defineConfig({
   plugins: [tsconfigPaths(), react()],
   resolve: {
     alias: {
-      // Το Next.js χειρίζεται το "server-only" εσωτερικά· στα tests δεν υπάρχει πακέτο
       "server-only": fileURLToPath(new URL("./tests/stubs/server-only.ts", import.meta.url)),
     },
   },
   test: {
     environment: "node",
     include: ["tests/**/*.test.{ts,tsx}"],
-    restoreMocks: true,
+    exclude: ["node_modules/**", ".next/**", "tests/emulator/**"],
   },
 });

@@ -11,6 +11,10 @@
  *
  *  Ο ανώνυμος χρήστης του checkout μετράει ως αποσυνδεδεμένος: έχει uid,
  *  αλλά δεν έχει λογαριασμό. Το `isAuthenticated` κάνει αυτή τη διάκριση.
+ *
+ *  Milestone 2: ο ανώνυμος χρήστης με αποθηκευμένη τελευταία παραγγελία
+ *  (ΓΙΑ ΤΟΝ ΙΔΙΟ uid) βλέπει και σύνδεσμο «Η παραγγελία μου». Οι εγγεγραμμένοι
+ *  έχουν το «Οι παραγγελίες μου» στο μενού.
  * ========================================================================== */
 
 import { useEffect, useRef, useState } from "react";
@@ -25,6 +29,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { getInitials } from "@/lib/auth";
+import { useLastOrder } from "@/lib/orders/last-order";
 import { cn } from "@/lib/format";
 
 export default function UserMenu({ className }: { className?: string }) {
@@ -38,6 +43,8 @@ export default function UserMenu({ className }: { className?: string }) {
     openRegister,
     logout,
   } = useAuth();
+
+  const guestLastOrder = useLastOrder(user?.isAnonymous ? user.uid : null);
 
   const [isOpen, setIsOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
@@ -78,6 +85,18 @@ export default function UserMenu({ className }: { className?: string }) {
   if (!isAuthenticated) {
     return (
       <div className={cn("flex items-center gap-2", className)}>
+        {/* Επισκέπτης με πρόσφατη παραγγελία σε αυτόν τον browser */}
+        {guestLastOrder && (
+          <Link
+            href={`/orders/${encodeURIComponent(guestLastOrder.orderId)}`}
+            aria-label="Η παραγγελία μου"
+            className="flex h-10 items-center gap-1.5 rounded-full border border-orange-200 bg-orange-50 px-3 text-sm font-semibold text-orange-700 transition-colors hover:bg-orange-100 sm:px-4"
+          >
+            <Receipt className="h-4 w-4" aria-hidden="true" />
+            <span className="hidden sm:inline">Η παραγγελία μου</span>
+          </Link>
+        )}
+
         {/* Ghost — διακριτικό, με εικονίδιο */}
         <button
           type="button"

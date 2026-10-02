@@ -13,6 +13,10 @@
  *      (αποτυγχάνει αν το έγγραφο υπάρχει) στο ΙΔΙΟ commit — ή γράφονται και
  *      τα δύο, ή κανένα.
  *
+ *  Το ίδιο ισχύει για το κλείσιμο προσπάθειας (/api/orders/recover): ο
+ *  έλεγχος «υπάρχει;» και η εγγραφή «κλειστή» γίνονται στην ίδια συναλλαγή,
+ *  με `create`, άρα δεν μπορούν να συνυπάρξουν παραγγελία και κλείσιμο.
+ *
  *  Το collection checkoutRequests είναι μόνο για τον server: τα Security
  *  Rules δεν έχουν κανόνα γι' αυτό, οπότε ο browser δεν έχει καμία πρόσβαση.
  * ========================================================================== */
@@ -80,6 +84,13 @@ export function createFirestoreCheckoutStore(db: Firestore): CheckoutStore {
 
             createOrderWithRecord({ orderId, order, recordId, record }) {
               transaction.create(orders.doc(orderId), order);
+              transaction.create(requests.doc(recordId), record);
+            },
+
+            /* Milestone 2: «κλειστή» προσπάθεια — create, ώστε αν το αρχικό
+             * αίτημα πρόλαβε να γράψει, η συναλλαγή αποτυγχάνει με
+             * ALREADY_EXISTS και ο καλών διαβάζει το αποτέλεσμά του. */
+            createClosedAttempt({ recordId, record }) {
               transaction.create(requests.doc(recordId), record);
             },
           }),

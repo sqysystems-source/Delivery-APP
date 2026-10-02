@@ -107,6 +107,11 @@ function isQuote(value: unknown): value is CheckoutQuote {
   );
 }
 
+/** Πλήρης, έγκυρη απάντηση επιτυχίας — κοινό με το recover-attempt.ts */
+export function isCheckoutSuccessBody(value: unknown): value is CheckoutSuccess {
+  return isSuccess(value);
+}
+
 function isSuccess(value: unknown): value is CheckoutSuccess {
   if (!isQuote(value)) return false;
   const body = value as unknown as Record<string, unknown>;
@@ -150,6 +155,15 @@ export type SubmitOrderOptions = {
   fetchImpl?: typeof fetch;
   /** Για tests — παρακάμπτει το Firebase Auth */
   getIdToken?: () => Promise<string>;
+  /** Για tests — ποιος uid αντιστοιχεί στο token (προεπιλογή: auth.currentUser) */
+  getUid?: () => string | null;
+  /**
+   * Καλείται ΑΦΟΥ βρεθεί ταυτότητα και ΠΡΙΝ φύγει το αίτημα, με τον uid του
+   * token. Το checkout το χρησιμοποιεί για να καταγράψει το κλειδί της
+   * προσπάθειας (μόνο κλειδί + uid), ώστε μια ανανέωση σελίδας να μπορεί να
+   * ελέγξει το αποτέλεσμα αντί να στείλει δεύτερη παραγγελία.
+   */
+  onBeforeSend?: (uid: string) => void;
 };
 
 async function defaultGetIdToken(): Promise<string> {
@@ -177,6 +191,16 @@ export async function submitOrder(
       message: CLIENT_MESSAGES.auth_failed,
       uncertain: false,
     });
+  }
+
+  /* 1β. Καταγραφή προσπάθειας — αν αποτύχει, απλώς δεν θα υπάρχει ανάκτηση */
+  const uid = (options.getUid ?? (() => auth.currentUser?.uid ?? null))();
+  if (uid && options.onBeforeSend) {
+    try {
+      options.onBeforeSend(uid);
+    } catch {
+      /* π.χ. μπλοκαρισμένο storage — η αποστολή συνεχίζει */
+    }
   }
 
   /* 2. Αίτημα με όριο χρόνου */

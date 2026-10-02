@@ -129,6 +129,10 @@ export class FakeCheckoutDb {
               creates.push({ path: `orders/${orderId}`, data: order });
               creates.push({ path: `${CHECKOUT_REQUESTS_COLLECTION}/${recordId}`, data: record });
             },
+            createClosedAttempt: ({ recordId, record }) => {
+              assertSafeSegment(recordId);
+              creates.push({ path: `${CHECKOUT_REQUESTS_COLLECTION}/${recordId}`, data: record });
+            },
           });
 
           /* ---- commit: σύγχρονο μπλοκ = ατομικό μέσα στο event loop ---- */

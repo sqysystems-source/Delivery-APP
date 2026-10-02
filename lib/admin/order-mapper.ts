@@ -11,7 +11,13 @@
  *  Καθαρό module (χωρίς Firebase), ώστε να δοκιμάζεται απομονωμένα.
  * ========================================================================== */
 
-import type { CheckoutCustomer, CheckoutDelivery, OrderStatus, PaymentMethod } from "@/types";
+import type {
+  CheckoutCustomer,
+  CheckoutDelivery,
+  OrderCancelReason,
+  OrderStatus,
+  PaymentMethod,
+} from "@/types";
 import { isPaymentMethod } from "@/lib/checkout/constants";
 
 export type AdminOrderLine = {
@@ -155,4 +161,12 @@ export function mapAdminOrder(id: string, data: Record<string, unknown>): AdminO
     paymentMethod: isPaymentMethod(data.paymentMethod) ? data.paymentMethod : null,
     isLegacy: customer === null && delivery === null,
   };
+}
+
+/**
+ * Milestone 2: ο λόγος ακύρωσης που γράφει το ταμπλό μαζί με "cancelled".
+ * Ακύρωση ΠΡΙΝ την αποδοχή = απόρριψη. Το ίδιο ελέγχουν και τα rules.
+ */
+export function cancelReasonForStatus(currentStatus: OrderStatus): OrderCancelReason {
+  return currentStatus === "pending" ? "rejected_by_shop" : "cancelled_by_shop";
 }

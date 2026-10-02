@@ -15,6 +15,14 @@
  *        υπολογίζει σε λεπτά → συγκρίνει με το σύνολο που είδε ο πελάτης →
  *        γράφει ΜΑΖΙ παραγγελία + αποτέλεσμα κλειδιού
  *
+ *  ── ΑΝΑΚΤΗΣΗ ΠΡΟΣΠΑΘΕΙΑΣ (milestone 2) ─────────────────────────────────
+ *  Το POST /api/orders/recover απαντά «υπάρχει παραγγελία με αυτό το κλειδί;»
+ *  για τον ΤΡΕΧΟΝΤΑ uid. Αν δεν υπάρχει, ΚΛΕΙΝΕΙ το κλειδί (closed record)
+ *  στην ίδια συναλλαγή, ώστε ένα αίτημα που ίσως ακόμη ταξιδεύει να μη
+ *  μπορεί να δημιουργήσει παραγγελία αργότερα. Έτσι η απάντηση «καμία
+ *  παραγγελία» είναι οριστική και ο πελάτης μπορεί να ξαναστείλει με
+ *  νέο κλειδί χωρίς κίνδυνο διπλής παραγγελίας.
+ *
  *  ── ΤΙ ΔΕΝ ΕΜΠΙΣΤΕΥΟΜΑΣΤΕ ΠΟΤΕ ΑΠΟ ΤΟΝ CLIENT ──────────────────────────
  *  Τιμές, ονόματα προϊόντων/καταστήματος, userId, ownerUid, κατάσταση, ώρα.
  *  Το `expectedTotalCents` είναι μόνο μέτρο σύγκρισης, ΠΟΤΕ τιμή.
@@ -28,6 +36,7 @@ import type {
   CheckoutErrorCode,
   CheckoutFieldErrors,
   CheckoutQuote,
+  CheckoutRecoveryResponseBody,
   CheckoutResponseBody,
   CheckoutSuccess,
   VerifiedOrderLine,
@@ -44,6 +53,7 @@ import { stableStringify } from "@/lib/checkout/idempotency";
 import {
   buildCompatAddress,
   cleanSingleLine,
+  isValidIdempotencyKey,
   validateCheckoutRequest,
   type ValidatedCheckoutRequest,
 } from "@/lib/checkout/validation";
@@ -60,6 +70,9 @@ export const IDEMPOTENCY_RECORD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const CHECKOUT_REQUESTS_COLLECTION = "checkoutRequests";
 
+/** Το σώμα του POST /api/orders/recover είναι μόνο `{ idempotencyKey }` */
+export const MAX_RECOVERY_REQUEST_BYTES = 1_024;
+
 /* ==========================================================================
  *  ΣΥΜΒΟΛΑΙΟ STORE — το υλοποιεί το Firestore adapter (και τα tests)
  * ========================================================================== */
@@ -67,12 +80,27 @@ export const CHECKOUT_REQUESTS_COLLECTION = "checkoutRequests";
 /** Η απάντηση όπως αποθηκεύεται (χωρίς το `replayed`, που ορίζεται κατά την επιστροφή) */
 export type StoredCheckoutResponse = Omit<CheckoutSuccess, "replayed">;
 
-export type IdempotencyRecord = {
+/** Ολοκληρωμένη προσπάθεια: η παραγγελία δημιουργήθηκε με αυτό το κλειδί */
+export type CompletedAttemptRecord = {
+  state: "completed";
   uid: string;
   requestHash: string;
   orderId: string;
   response: StoredCheckoutResponse;
 };
+
+/**
+ * Κλειστή προσπάθεια (milestone 2): ο πελάτης ρώτησε μέσω του
+ * /api/orders/recover και ΔΕΝ υπήρχε παραγγελία. Το κλειδί δεν μπορεί πια
+ * να δημιουργήσει παραγγελία — ένα καθυστερημένο αίτημα παίρνει 409.
+ */
+export type ClosedAttemptRecord = {
+  state: "closed";
+  uid: string;
+};
+
+/** Ό,τι μπορεί να βρίσκεται στο checkoutRequests/{id} */
+export type IdempotencyRecord = CompletedAttemptRecord | ClosedAttemptRecord;
 
 export type CheckoutTransactionWrite = {
   orderId: string;
@@ -90,6 +118,8 @@ export interface CheckoutTransaction {
   ): Promise<Array<Record<string, unknown> | null>>;
   /** Και τα δύο έγγραφα δημιουργούνται ΜΑΖΙ, με semantics «create» (όχι overwrite) */
   createOrderWithRecord(write: CheckoutTransactionWrite): void;
+  /** Κλείνει ένα αχρησιμοποίητο κλειδί — semantics «create» (όχι overwrite) */
+  createClosedAttempt(write: { recordId: string; record: Record<string, unknown> }): void;
 }
 
 export interface CheckoutStore {
@@ -120,6 +150,11 @@ export type CheckoutHttpResult = {
   body: CheckoutResponseBody;
 };
 
+export type RecoveryHttpResult = {
+  status: number;
+  body: CheckoutRecoveryResponseBody;
+};
+
 /* ==========================================================================
  *  ΜΗΝΥΜΑΤΑ
  * ========================================================================== */
@@ -146,6 +181,8 @@ const MESSAGES: Record<Exclude<CheckoutErrorCode, "network_error" | "invalid_res
     "Οι τιμές ή τα μεταφορικά άλλαξαν. Έλεγξε τη σύνοψη και επιβεβαίωσε ξανά την παραγγελία.",
   idempotency_key_reused:
     "Αυτή η προσπάθεια παραγγελίας έχει ήδη σταλεί με διαφορετικά στοιχεία. Έλεγξε την παραγγελία και επιβεβαίωσε ξανά.",
+  checkout_attempt_closed:
+    "Αυτή η προσπάθεια παραγγελίας έκλεισε χωρίς να καταχωρηθεί παραγγελία. Έλεγξε τα στοιχεία και επιβεβαίωσε ξανά.",
   shop_config_invalid:
     "Το κατάστημα έχει πρόβλημα στις ρυθμίσεις του και δεν δέχεται παραγγελίες αυτή τη στιγμή.",
   menu_config_invalid:
@@ -449,6 +486,11 @@ function replayOrConflict(
     return failure(409, "idempotency_key_reused");
   }
 
+  /* Το κλειδί έκλεισε μέσω /api/orders/recover → ΚΑΜΙΑ παραγγελία, ποτέ */
+  if (record.state === "closed") {
+    return failure(409, "checkout_attempt_closed");
+  }
+
   if (record.requestHash !== requestHash) {
     return failure(409, "idempotency_key_reused", {
       existingOrder: { orderId: record.orderId, code: record.response.code },
@@ -473,6 +515,21 @@ function parseBearer(header: string | null): string | null {
   return match ? match[1] : null;
 }
 
+/** Ταυτότητα ΜΟΝΟ από το επαληθευμένο Firebase ID token — ποτέ από το σώμα */
+async function authenticate(
+  deps: Pick<CheckoutDeps, "verifyIdToken">,
+  authorization: string | null,
+): Promise<string | null> {
+  const token = parseBearer(authorization);
+  if (!token) return null;
+  try {
+    const decoded = await deps.verifyIdToken(token);
+    return typeof decoded.uid === "string" && decoded.uid.length > 0 ? decoded.uid : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function handleCheckoutRequest(
   deps: CheckoutDeps,
   input: { authorization: string | null; rawBody: string },
@@ -485,17 +542,8 @@ export async function handleCheckoutRequest(
   }
 
   /* ----------------------------- 2. Ταυτότητα ---------------------------- */
-  const token = parseBearer(input.authorization);
-  if (!token) return failure(401, "unauthenticated");
-
-  let uid: string;
-  try {
-    const decoded = await deps.verifyIdToken(token);
-    uid = decoded.uid;
-  } catch {
-    return failure(401, "unauthenticated");
-  }
-  if (typeof uid !== "string" || uid.length === 0) return failure(401, "unauthenticated");
+  const uid = await authenticate(deps, input.authorization);
+  if (!uid) return failure(401, "unauthenticated");
 
   /* ------------------------------ 3. JSON -------------------------------- */
   let json: unknown;
@@ -610,10 +658,19 @@ export async function handleCheckoutRequest(
 export function parseIdempotencyRecord(data: unknown): IdempotencyRecord | null {
   if (typeof data !== "object" || data === null) return null;
   const record = data as Record<string, unknown>;
-  const response = record.response as Record<string, unknown> | undefined;
 
+  if (typeof record.uid !== "string" || record.uid.length === 0) return null;
+
+  /* Κλειστή προσπάθεια (milestone 2) */
+  if (record.state === "closed") {
+    return { state: "closed", uid: record.uid };
+  }
+
+  /* Ολοκληρωμένη — τα έγγραφα του milestone 1 δεν έχουν `state` */
+  if (record.state !== undefined && record.state !== "completed") return null;
+
+  const response = record.response as Record<string, unknown> | undefined;
   if (
-    typeof record.uid !== "string" ||
     typeof record.requestHash !== "string" ||
     typeof record.orderId !== "string" ||
     typeof response !== "object" ||
@@ -626,9 +683,130 @@ export function parseIdempotencyRecord(data: unknown): IdempotencyRecord | null 
   }
 
   return {
+    state: "completed",
     uid: record.uid,
     requestHash: record.requestHash,
     orderId: record.orderId,
     response: response as unknown as StoredCheckoutResponse,
   };
+}
+
+/* ==========================================================================
+ *  ΑΝΑΚΤΗΣΗ ΠΡΟΣΠΑΘΕΙΑΣ — POST /api/orders/recover
+ *
+ *  Χρήση: ο browser κράτησε ΜΟΝΟ το κλειδί μιας προσπάθειας που δεν ξέρει αν
+ *  ολοκληρώθηκε (π.χ. ανανέωση σελίδας μετά από χαμένη απάντηση). ΔΕΝ
+ *  ξαναστέλνει την παραγγελία· ρωτά:
+ *
+ *    • υπάρχει ολοκληρωμένη προσπάθεια του ΙΔΙΟΥ uid → η αρχική απάντηση
+ *      (outcome: "order_found", replayed: true)
+ *    • δεν υπάρχει → δημιουργείται «κλειστή» εγγραφή ΑΤΟΜΙΚΑ και η απάντηση
+ *      είναι οριστική (outcome: "no_order"): κανένα μεταγενέστερο αίτημα με
+ *      αυτό το κλειδί δεν θα δημιουργήσει παραγγελία
+ *    • ήδη κλειστή → "no_order" (ίδια απάντηση, idempotent)
+ *
+ *  Το uid έρχεται ΜΟΝΟ από το token και είναι μέρος του id του εγγράφου, οπότε
+ *  ένας χρήστης δεν μπορεί να δει ή να κλείσει προσπάθεια άλλου χρήστη, ακόμη
+ *  κι αν μάθει το κλειδί του. Ο έλεγχος `record.uid === uid` γίνεται ξανά ρητά,
+ *  επειδή το Admin SDK παρακάμπτει τα Security Rules.
+ * ========================================================================== */
+
+function recoveryFailure(
+  status: number,
+  code: "invalid_json" | "payload_too_large" | "validation_failed" | "unauthenticated" | "internal_error" | "idempotency_key_reused",
+  extra: Partial<Omit<CheckoutErrorBody, "ok" | "code">> = {},
+): RecoveryHttpResult {
+  return failure(status, code, extra) as RecoveryHttpResult;
+}
+
+function recoveryFromRecord(record: IdempotencyRecord, uid: string): RecoveryHttpResult {
+  if (record.uid !== uid) {
+    // Πρακτικά αδύνατο (το id περιέχει το uid)· δεν αποκαλύπτουμε τίποτα
+    return recoveryFailure(409, "idempotency_key_reused");
+  }
+  if (record.state === "closed") {
+    return { status: 200, body: { ok: true, outcome: "no_order" } };
+  }
+  return {
+    status: 200,
+    body: { ok: true, outcome: "order_found", order: { ...record.response, replayed: true } },
+  };
+}
+
+type RecoveryOutcome =
+  | { kind: "existing"; record: IdempotencyRecord }
+  | { kind: "closed" };
+
+export async function handleAttemptRecovery(
+  deps: CheckoutDeps,
+  input: { authorization: string | null; rawBody: string },
+): Promise<RecoveryHttpResult> {
+  const { store, logger } = deps;
+
+  if (new TextEncoder().encode(input.rawBody).length > MAX_RECOVERY_REQUEST_BYTES) {
+    return recoveryFailure(413, "payload_too_large");
+  }
+
+  const uid = await authenticate(deps, input.authorization);
+  if (!uid) return recoveryFailure(401, "unauthenticated");
+
+  let json: unknown;
+  try {
+    json = JSON.parse(input.rawBody);
+  } catch {
+    return recoveryFailure(400, "invalid_json");
+  }
+
+  const key =
+    typeof json === "object" && json !== null
+      ? (json as Record<string, unknown>).idempotencyKey
+      : undefined;
+  if (!isValidIdempotencyKey(key)) {
+    return recoveryFailure(400, "validation_failed", {
+      fieldErrors: { idempotencyKey: "Μη έγκυρο αναγνωριστικό προσπάθειας." },
+    });
+  }
+
+  const recordId = idempotencyRecordId(uid, key);
+
+  try {
+    /* Γρήγορος δρόμος — χωρίς συναλλαγή όταν η απάντηση είναι ήδη γνωστή */
+    const existing = await store.getIdempotencyRecord(recordId);
+    if (existing) return recoveryFromRecord(existing, uid);
+
+    let outcome: RecoveryOutcome;
+    try {
+      outcome = await store.runTransaction<RecoveryOutcome>(async (tx) => {
+        const record = await tx.getIdempotencyRecord(recordId);
+        if (record) return { kind: "existing", record };
+
+        tx.createClosedAttempt({
+          recordId,
+          record: {
+            uid,
+            state: "closed",
+            createdAt: deps.serverTimestamp(),
+            expiresAt: deps.timestampFromMillis(deps.now() + IDEMPOTENCY_RECORD_TTL_MS),
+          },
+        });
+        return { kind: "closed" };
+      });
+    } catch (error) {
+      /* Το αρχικό αίτημα (ή άλλος έλεγχος) πρόλαβε να γράψει πρώτο */
+      if (store.isAlreadyExistsError(error)) {
+        const winner = await store.getIdempotencyRecord(recordId);
+        if (winner) return recoveryFromRecord(winner, uid);
+      }
+      throw error;
+    }
+
+    return outcome.kind === "existing"
+      ? recoveryFromRecord(outcome.record, uid)
+      : { status: 200, body: { ok: true, outcome: "no_order" } };
+  } catch (error) {
+    logger?.error("[orders/recover] Αποτυχία ελέγχου προσπάθειας:", error);
+    return recoveryFailure(500, "internal_error", {
+      message: "Δεν ήταν δυνατός ο έλεγχος της προηγούμενης παραγγελίας. Δοκίμασε ξανά σε λίγο.",
+    });
+  }
 }
