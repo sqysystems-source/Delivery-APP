@@ -21,6 +21,7 @@
  * ========================================================================== */
 
 import type {
+  OrderLineOption,
   CheckoutDelivery,
   OrderCancelReason,
   OrderStatus,
@@ -28,6 +29,7 @@ import type {
 } from "@/types";
 import { isPaymentMethod } from "@/lib/checkout/constants";
 import { centsToEuros } from "@/lib/checkout/money";
+import { readOptionSnapshotForDisplay } from "@/lib/menu/options";
 
 /* --------------------------------------------------------------------------
  *  Τύποι
@@ -42,6 +44,8 @@ export type CustomerOrderLine = {
   quantity: number;
   unitPrice: number;
   lineTotal: number;
+  /** Milestone 3: στιγμιότυπο επιλογών (κενό σε γραμμές χωρίς επιλογές / παλιές παραγγελίες) */
+  options: OrderLineOption[];
 };
 
 export type CustomerOrder = {
@@ -228,6 +232,7 @@ function toLines(value: unknown): CustomerOrderLine[] {
       quantity,
       unitPrice,
       lineTotal,
+      options: readOptionSnapshotForDisplay(line.options),
     };
   });
 }

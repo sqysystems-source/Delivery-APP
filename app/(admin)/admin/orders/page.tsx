@@ -40,6 +40,7 @@ import {
   Volume2,
   X,
 } from "lucide-react";
+import LineOptionsSummary from "@/components/options/LineOptionsSummary";
 import { useAdminOrders, type AdminOrder } from "@/hooks/useAdminOrders";
 import { useOrderAlert } from "@/hooks/useOrderAlert";
 import { cancelReasonForStatus } from "@/lib/admin/order-mapper";
@@ -704,8 +705,8 @@ function OrderDetail({
           )}
 
           <ul className="mt-5 divide-y divide-gray-100">
-            {order.lines.map((line) => (
-              <li key={line.itemId} className="flex items-start gap-3 py-3">
+            {order.lines.map((line, index) => (
+              <li key={`${index}-${line.itemId}`} className="flex items-start gap-3 py-3">
                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-orange-100 text-sm font-black text-orange-700">
                   {line.quantity}×
                 </span>
@@ -713,8 +714,16 @@ function OrderDetail({
                   <span className="block text-base font-bold text-gray-900">
                     {line.name}
                   </span>
+                  {/* Milestone 3: επιλογές όπως αποθηκεύτηκαν στην παραγγελία */}
+                  <LineOptionsSummary
+                    options={line.options}
+                    className="mb-1 text-sm font-semibold text-gray-800"
+                  />
                   <span className="text-xs text-gray-500">
                     {formatPrice(line.unitPrice)} / τεμ.
+                    {line.basePrice !== null && line.basePrice !== line.unitPrice && (
+                      <> (βάση {formatPrice(line.basePrice)} + επιλογές)</>
+                    )}
                   </span>
                 </span>
                 <span className="shrink-0 text-base font-black text-gray-900">

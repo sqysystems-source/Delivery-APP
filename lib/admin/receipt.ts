@@ -15,6 +15,7 @@ import type { AdminOrder } from "@/lib/admin/order-mapper";
 import { PAYMENT_METHOD_LABELS } from "@/lib/checkout/constants";
 import { formatPhoneForDisplay } from "@/lib/checkout/phone";
 import { formatPrice } from "@/lib/format";
+import { formatOptionLines } from "@/lib/menu/options";
 
 export const RECEIPT_WIDTH = 32;
 const PRICE_COLUMN = 8;
@@ -107,6 +108,10 @@ export function buildReceiptText(order: AdminOrder): string {
           : `   ${text}`,
       );
     });
+    /* Milestone 3: επιλογές από το ΣΤΙΓΜΙΟΤΥΠΟ της παραγγελίας, με εσοχή */
+    for (const optionLine of formatOptionLines(line.options ?? [])) {
+      for (const text of wrapText(optionLine, RECEIPT_WIDTH - 3)) out.push(`   ${text}`);
+    }
   }
   out.push(SEPARATOR);
 

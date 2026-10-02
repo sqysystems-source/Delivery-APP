@@ -100,6 +100,19 @@ service cloud.firestore {
        * ανήκει σε αυτό το κατάστημα. Επιπλέον απαιτούμε το πεδίο shopId
        * μέσα στο document να ΣΥΜΦΩΝΕΙ με τη διαδρομή, ώστε να μη μείνει
        * ποτέ ασυνέπεια που θα μπέρδευε queries και αναφορές.
+       *
+       * Milestone 3 — ΕΠΙΛΟΓΕΣ ΠΡΟΪΟΝΤΟΣ (`optionGroups`):
+       * Οι ομάδες επιλογών είναι εμφωλευμένες λίστες (ομάδες → επιλογές) με
+       * κανόνες για ΟΛΗ τη λίστα (μοναδικά ids, min ≤ max ≤ πλήθος, ποσά,
+       * αδύνατες υποχρεωτικές ομάδες). Τα Rules δεν έχουν βρόχους, άρα δεν
+       * μπορούν να τα ελέγξουν. Γι' αυτό:
+       *   • το `optionGroups` το γράφει ΜΟΝΟ ο server
+       *     (POST /api/admin/menu-items, Admin SDK), που επαληθεύει τον
+       *     ΤΡΕΧΟΝΤΑ ιδιοκτήτη και επικυρώνει όλη τη ρύθμιση·
+       *   • κανένας client (ούτε admin από τον browser) δεν δημιουργεί ούτε
+       *     αλλάζει το πεδίο· μπορεί όμως να ΥΠΑΡΧΕΙ στο έγγραφο, ώστε η
+       *     εναλλαγή διαθεσιμότητας και οι άλλες άμεσες εγγραφές να
+       *     συνεχίσουν να δουλεύουν σε προϊόντα με επιλογές.
        */
       match /menuItems/{itemId} {
         function isValidMenuItem(data) {
@@ -107,7 +120,7 @@ service cloud.firestore {
             && data.keys().hasOnly([
                  'shopId', 'categoryId', 'name', 'description', 'price',
                  'oldPrice', 'image', 'popular', 'available',
-                 'sortOrder', 'createdAt', 'updatedAt'
+                 'sortOrder', 'createdAt', 'updatedAt', 'optionGroups'
                ])
             // Το προϊόν δηλώνει το κατάστημα στο οποίο βρίσκεται
             && data.shopId == shopId
@@ -131,18 +144,30 @@ service cloud.firestore {
                 || (data.image is string && data.image.size() <= 500))
             && (!('popular' in data) || data.popular is bool)
             && (!('available' in data) || data.available is bool)
-            && (!('sortOrder' in data) || data.sortOrder is number);
+            && (!('sortOrder' in data) || data.sortOrder is number)
+            // Milestone 3: μόνο έλεγχος σχήματος — η πλήρης επικύρωση γίνεται
+            // στον server, που είναι και ο μόνος που το γράφει (δες παρακάτω)
+            && (!('optionGroups' in data)
+                || (data.optionGroups is list
+                    && data.optionGroups.size() >= 1
+                    && data.optionGroups.size() <= 8));
         }
 
         allow read: if true;
 
         allow create: if (isAdmin() || isShopOwner(shopId))
-          && isValidMenuItem(request.resource.data);
+          && isValidMenuItem(request.resource.data)
+          // Milestone 3: νέο προϊόν από τον browser → ποτέ με επιλογές
+          && !('optionGroups' in request.resource.data);
 
         // Στο update το shopId μένει κλειδωμένο: ένα προϊόν δεν «μετακομίζει»
         allow update: if (isAdmin() || isShopOwner(shopId))
           && isValidMenuItem(request.resource.data)
-          && request.resource.data.shopId == resource.data.shopId;
+          && request.resource.data.shopId == resource.data.shopId
+          // Milestone 3: ο browser δεν προσθέτει/αλλάζει/σβήνει επιλογές
+          && !request.resource.data.diff(resource.data)
+                .affectedKeys()
+                .hasAny(['optionGroups']);
 
         allow delete: if isAdmin() || isShopOwner(shopId);
       }

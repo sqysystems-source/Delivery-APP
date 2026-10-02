@@ -31,6 +31,13 @@
  *    το παλιό κλειδί, και ΜΟΝΟ αν δεν υπάρχει παραγγελία φεύγει το νέο.
  *  • Προσπάθεια άλλου uid ή παλαιότερη από 6 ημέρες → ρητή ειδοποίηση, χωρίς
  *    αυτόματο έλεγχο.
+ *
+ *  ── ΕΠΙΛΟΓΕΣ ΠΡΟΪΟΝΤΟΣ (milestone 3) ───────────────────────────────────
+ *  • Το αίτημα στέλνει ΜΟΝΟ ids επιλογών (toRequestLines)· ο server τιμολογεί.
+ *  • option_unavailable / options_changed: ΚΑΜΙΑ παραγγελία. Η συγκεκριμένη
+ *    γραμμή επισημαίνεται και ο πελάτης την επεξεργάζεται (EditCartLineDialog)
+ *    ή την αφαιρεί — οι επιλογές του δεν πετιούνται ποτέ σιωπηλά.
+ *  • Όλα τα στιγμιότυπα/αφαιρέσεις γίνονται ανά ΓΡΑΜΜΗ (itemId + επιλογές).
  * ========================================================================== */
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
@@ -53,6 +60,7 @@ import {
 import CheckoutField from "@/components/checkout/CheckoutField";
 import CheckoutSuccess from "@/components/checkout/CheckoutSuccess";
 import CheckoutSummary, { type PriceChangeNotice } from "@/components/checkout/CheckoutSummary";
+import EditCartLineDialog from "@/components/options/EditCartLineDialog";
 import { useAuth } from "@/context/AuthContext";
 import { useCart } from "@/context/CartContext";
 import { useCheckoutForm } from "@/hooks/useCheckoutForm";
@@ -77,6 +85,7 @@ import {
   type IdempotencyKeyState,
 } from "@/lib/checkout/idempotency";
 import { centsToEuros } from "@/lib/checkout/money";
+import { formatOptionLines, lineKeyOf } from "@/lib/menu/options";
 import { CheckoutError, submitOrder } from "@/lib/checkout/submit-order";
 import { auth } from "@/lib/firebase";
 import {
@@ -89,6 +98,7 @@ import {
 } from "@/lib/checkout/validation";
 import { cn, formatPrice } from "@/lib/format";
 import type {
+  CartLine,
   CheckoutFieldErrors,
   CheckoutQuote,
   CheckoutRequest,
@@ -130,13 +140,33 @@ async function resolveStoredAttempt(
 function snapshotFromResult(result: CheckoutSuccessResult): SubmittedCartSnapshot {
   return {
     shopId: result.shopId,
-    lines: result.lines.map((line) => ({
-      itemId: line.itemId,
-      name: line.name,
-      unitPrice: line.unitPrice,
-      quantity: line.quantity,
-    })),
+    lines: result.lines.map((line) =>
+      line.options && line.options.length > 0 && line.basePrice !== undefined
+        ? {
+            itemId: line.itemId,
+            name: line.name,
+            unitPrice: line.unitPrice,
+            quantity: line.quantity,
+            basePrice: line.basePrice,
+            options: line.options,
+          }
+        : {
+            itemId: line.itemId,
+            name: line.name,
+            unitPrice: line.unitPrice,
+            quantity: line.quantity,
+          },
+    ),
   };
+}
+
+/** Κωδικοί σφάλματος που ζητούν επεξεργασία ΜΙΑΣ γραμμής (milestone 3) */
+const OPTION_ERROR_CODES = new Set(["option_unavailable", "options_changed"]);
+
+/** Όνομα + σύντομη περιγραφή επιλογών για ειδοποιήσεις */
+function lineLabel(line: { name: string; options?: CartLine["options"] }): string {
+  const summary = line.options ? formatOptionLines(line.options).join(" · ") : "";
+  return summary ? `${line.name} (${summary})` : line.name;
 }
 
 type FocusTarget =
@@ -154,13 +184,14 @@ function buildPriceNotice(
   previousTotalCents: number,
   quote: CheckoutQuote,
 ): PriceChangeNotice {
-  const before = new Map(snapshot.lines.map((line) => [line.itemId, line.unitPrice]));
+  const before = new Map(snapshot.lines.map((line) => [lineKeyOf(line), line.unitPrice]));
   const changes = quote.lines
-    .filter((line) => before.has(line.itemId) && before.get(line.itemId) !== line.unitPrice)
-    .map((line) => ({
-      itemId: line.itemId,
-      name: line.name,
-      before: before.get(line.itemId) as number,
+    .map((line) => ({ line, key: lineKeyOf(line) }))
+    .filter(({ key, line }) => before.has(key) && before.get(key) !== line.unitPrice)
+    .map(({ key, line }) => ({
+      key,
+      name: lineLabel(line),
+      before: before.get(key) as number,
       after: line.unitPrice,
     }));
 
@@ -184,6 +215,7 @@ export default function CheckoutClient() {
     increase,
     decrease,
     removeLine,
+    removeItemLines,
     orderNotes,
     setOrderNotes,
     deliveryAddress,
@@ -211,6 +243,9 @@ export default function CheckoutClient() {
   const [recoveryCheck, setRecoveryCheck] = useState<RecoveryCheck | null>(null);
   const [recoveryNotice, setRecoveryNotice] = useState<RecoveryNotice | null>(null);
   const [recheckToken, setRecheckToken] = useState(0);
+  /** Milestone 3: γραμμή υπό επεξεργασία επιλογών */
+  const [editingLine, setEditingLine] = useState<CartLine | null>(null);
+  const [lineAnnouncement, setLineAnnouncement] = useState("");
 
   const submittingRef = useRef(false);
   const keyRef = useRef<IdempotencyKeyState | null>(null);
@@ -584,8 +619,17 @@ export default function CheckoutClient() {
     recoveryPhase === "idle" &&
     totals.missingForMinOrderCents === 0 &&
     !totals.exceedsMaxOrder;
+  /* Milestone 3: σφάλμα επιλογών → η ΣΥΓΚΕΚΡΙΜΕΝΗ γραμμή (όχι όλο το προϊόν) */
+  const errorLine =
+    submitError && OPTION_ERROR_CODES.has(submitError.code) && submitError.lineKey
+      ? (cart.lines.find((line) => lineKeyOf(line) === submitError.lineKey) ?? null)
+      : null;
+  /* Προϊόν που καταργήθηκε/εξαντλήθηκε → όλες οι παραλλαγές του */
   const errorItemInCart =
-    submitError?.itemId && cart.lines.some((line) => line.itemId === submitError.itemId)
+    !errorLine &&
+    submitError?.itemId &&
+    !OPTION_ERROR_CODES.has(submitError.code) &&
+    cart.lines.some((line) => line.itemId === submitError.itemId)
       ? submitError.itemId
       : null;
 
@@ -872,7 +916,7 @@ export default function CheckoutClient() {
                 disabled={submitting}
                 autoComplete="off"
                 maxLength={CHECKOUT_LIMITS.maxNotesLength}
-                placeholder="π.χ. χωρίς κρεμμύδι, έξτρα σάλτσα…"
+                placeholder="π.χ. χρειαζόμαστε μαχαιροπίρουνα"
                 hint={`${orderNotes.length}/${CHECKOUT_LIMITS.maxNotesLength}`}
                 className="mt-4"
               />
@@ -914,6 +958,8 @@ export default function CheckoutClient() {
               onIncrease={increase}
               onDecrease={decrease}
               onRemove={removeLine}
+              onEdit={setEditingLine}
+              highlightKey={errorLine ? lineKeyOf(errorLine) : null}
               linesError={errors.lines ?? submitError?.fieldErrors?.lines}
               priceNotice={activePriceNotice}
               priceNoticeRef={priceNoticeRef}
@@ -960,13 +1006,36 @@ export default function CheckoutClient() {
                     <button
                       type="button"
                       onClick={() => {
-                        removeLine(errorItemInCart);
+                        removeItemLines(errorItemInCart);
                         setSubmitError(null);
                       }}
                       className="mt-3 rounded-full bg-white px-4 py-2 text-xs font-bold text-red-700 shadow-sm transition-colors hover:bg-red-100"
                     >
                       Αφαίρεση από το καλάθι
                     </button>
+                  )}
+
+                  {errorLine && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditingLine(errorLine)}
+                        aria-haspopup="dialog"
+                        className="rounded-full bg-red-600 px-4 py-2 text-xs font-bold text-white shadow-sm transition-colors hover:bg-red-700"
+                      >
+                        Επεξεργασία επιλογών
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          removeLine(lineKeyOf(errorLine));
+                          setSubmitError(null);
+                        }}
+                        className="rounded-full bg-white px-4 py-2 text-xs font-bold text-red-700 shadow-sm transition-colors hover:bg-red-100"
+                      >
+                        Αφαίρεση γραμμής
+                      </button>
+                    </div>
                   )}
 
                   {submitError.uncertain && (
@@ -1021,6 +1090,27 @@ export default function CheckoutClient() {
             </CheckoutSummary>
           </div>
         </form>
+
+        <p className="sr-only" role="status" aria-live="polite">
+          {lineAnnouncement}
+        </p>
+
+        {editingLine && (
+          <EditCartLineDialog
+            key={lineKeyOf(editingLine)}
+            shopId={cart.shop.id}
+            line={editingLine}
+            notice={
+              errorLine && lineKeyOf(errorLine) === lineKeyOf(editingLine) ? submitError?.message : null
+            }
+            onClose={() => setEditingLine(null)}
+            onSaved={(message) => {
+              setLineAnnouncement(message);
+              // Το σφάλμα αφορούσε αυτή τη γραμμή — ο πελάτης την άλλαξε ρητά
+              if (errorLine && lineKeyOf(errorLine) === lineKeyOf(editingLine)) setSubmitError(null);
+            }}
+          />
+        )}
       </div>
     </main>
   );

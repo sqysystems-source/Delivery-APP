@@ -11,19 +11,25 @@
  *  Δεν υπάρχει τρόπος να γράψει κάποιος σε ξένο κατάλογο — ούτε κατά λάθος:
  *  το shopId μπαίνει στη διαδρομή, δεν έρχεται από τη φόρμα.
  *
+ *  ── ΑΠΟΘΗΚΕΥΣΗ ΠΡΟΪΟΝΤΟΣ (milestone 3) ─────────────────────────────────
+ *  Η δημιουργία/επεξεργασία (μαζί με τις ομάδες επιλογών) γίνεται μέσω
+ *  POST /api/admin/menu-items: ο server επαληθεύει τον ΤΡΕΧΟΝΤΑ ιδιοκτήτη
+ *  και επικυρώνει όλο το προϊόν πριν γράψει (τα Rules δεν μπορούν να
+ *  ελέγξουν εμφωλευμένες λίστες επιλογών). Η εναλλαγή διαθεσιμότητας και η
+ *  διαγραφή μένουν άμεσες εγγραφές, όπως πριν.
+ *
  *  ── ΠΡΟΣΟΧΗ ΣΤΑ ΠΡΟΑΙΡΕΤΙΚΑ ΠΕΔΙΑ ──────────────────────────────────────
  *  Τα rules ελέγχουν τον τύπο ενός πεδίου ΜΟΝΟ αν αυτό υπάρχει. Άρα, όταν ο
- *  καταστηματάρχης σβήνει την παλιά τιμή ή την εικόνα, ΔΕΝ γράφουμε null
- *  (θα απορριπτόταν: το null δεν είναι number) — διαγράφουμε το πεδίο με
- *  deleteField().
+ *  καταστηματάρχης σβήνει την παλιά τιμή ή την εικόνα, ΔΕΝ γράφεται null
+ *  (θα απορριπτόταν: το null δεν είναι number) — το πεδίο διαγράφεται. Από
+ *  το milestone 3 αυτό το κάνει ο server (FieldValue.delete()), και το ίδιο
+ *  για το `optionGroups` όταν αφαιρεθούν όλες οι επιλογές.
  * ========================================================================== */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  addDoc,
   collection,
   deleteDoc,
-  deleteField,
   doc,
   onSnapshot,
   orderBy,
@@ -32,7 +38,8 @@ import {
   updateDoc,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
-import type { MenuCategory, MenuItem } from "@/types";
+import { saveMenuItem } from "@/lib/menu/save-menu-item";
+import type { MenuCategory, MenuItem, MenuOptionGroup } from "@/types";
 
 /* --------------------------------------------------------------------------
  *  Τύποι
@@ -49,6 +56,8 @@ export type MenuItemInput = {
   image: string | null;
   popular: boolean;
   available: boolean;
+  /** Milestone 3: [] = χωρίς επιλογές */
+  optionGroups: MenuOptionGroup[];
 };
 
 export type UseMenuManager = {
@@ -90,6 +99,8 @@ function mapItem(id: string, shopId: string, data: Record<string, unknown>): Men
     /* Προϊόν χωρίς το πεδίο θεωρείται διαθέσιμο — έτσι τα παλιά seeded
      * documents δεν εμφανίζονται ξαφνικά ως εξαντλημένα. */
     available: data.available !== false,
+    /* Ακατέργαστο — η φόρμα το διαβάζει μέσω validateOptionGroups */
+    ...(data.optionGroups !== undefined ? { optionGroups: data.optionGroups as MenuOptionGroup[] } : {}),
   };
 }
 
@@ -192,44 +203,28 @@ export function useMenuManager(shopId: string | null): UseMenuManager {
       if (!shopId) throw new Error("Δεν βρέθηκε κατάστημα.");
 
       setBusyId(itemId ?? "new");
-
-      /* Κοινά πεδία. Το shopId μπαίνει από τη διαδρομή, ΠΟΤΕ από τη φόρμα. */
-      const base = {
-        shopId,
-        categoryId: input.categoryId,
-        name: input.name.trim(),
-        description: input.description.trim(),
-        price: input.price,
-        popular: input.popular,
-        available: input.available,
-        updatedAt: serverTimestamp(),
-      };
-
-      const hasOldPrice = input.oldPrice !== null && input.oldPrice > input.price;
-      const hasImage = typeof input.image === "string" && input.image.trim().length > 0;
-
       try {
-        if (itemId) {
-          /* Ενημέρωση: τα προαιρετικά πεδία που «άδειασαν» διαγράφονται */
-          await updateDoc(doc(db, "shops", shopId, "menuItems", itemId), {
-            ...base,
-            oldPrice: hasOldPrice ? input.oldPrice : deleteField(),
-            image: hasImage ? input.image!.trim() : deleteField(),
-          });
-        } else {
-          /* Δημιουργία: τα κενά προαιρετικά απλώς δεν γράφονται */
-          await addDoc(collection(db, "shops", shopId, "menuItems"), {
-            ...base,
-            ...(hasOldPrice ? { oldPrice: input.oldPrice } : {}),
-            ...(hasImage ? { image: input.image!.trim() } : {}),
-            createdAt: serverTimestamp(),
-          });
-        }
+        /* Το shopId μπαίνει από το κατάστημα του συνδεδεμένου χρήστη, ΠΟΤΕ
+         * από τη φόρμα· ο server ελέγχει ξανά ότι του ανήκει. Τα σφάλματα
+         * (MenuItemSaveError) φτάνουν στη φόρμα με λάθη ανά πεδίο. */
+        await saveMenuItem(
+          shopId,
+          {
+            name: input.name.trim(),
+            description: input.description.trim(),
+            categoryId: input.categoryId,
+            price: input.price,
+            oldPrice: input.oldPrice !== null && input.oldPrice > input.price ? input.oldPrice : null,
+            image: typeof input.image === "string" && input.image.trim() ? input.image.trim() : null,
+            popular: input.popular,
+            available: input.available,
+            optionGroups: input.optionGroups,
+          },
+          itemId,
+        );
       } catch (caught) {
         console.error("[menu] Αποτυχία αποθήκευσης προϊόντος:", caught);
-        throw new Error(
-          "Δεν ήταν δυνατή η αποθήκευση. Έλεγξε τα πεδία και δοκίμασε ξανά.",
-        );
+        throw caught;
       } finally {
         setBusyId(null);
       }

@@ -18,6 +18,7 @@ import type {
 } from "@/types";
 import { CHECKOUT_LIMITS, isPaymentMethod } from "@/lib/checkout/constants";
 import { normalizePhone } from "@/lib/checkout/phone";
+import { canonicalizeSelections, cartLineKey } from "@/lib/menu/options";
 
 /* ==========================================================================
  *  ΚΑΘΑΡΙΣΜΟΣ ΚΕΙΜΕΝΟΥ
@@ -311,12 +312,19 @@ export type LinesValidationResult =
   | { ok: false; error: string };
 
 /**
- * Επικυρώνει γραμμές, ΕΝΟΠΟΙΕΙ διπλότυπα και ΞΑΝΑΕΛΕΓΧΕΙ το όριο ανά
- * προϊόν ΜΕΤΑ την ενοποίηση: δύο γραμμές των 15 για το ίδιο προϊόν είναι
- * 30 τεμάχια, όχι «δύο έγκυρες γραμμές».
+ * Επικυρώνει γραμμές, ΕΝΟΠΟΙΕΙ διπλότυπα και ΞΑΝΑΕΛΕΓΧΕΙ τα όρια ΜΕΤΑ την
+ * ενοποίηση: δύο γραμμές των 15 για το ίδιο προϊόν είναι 30 τεμάχια, όχι
+ * «δύο έγκυρες γραμμές».
  *
- * Επιστρέφει γραμμές ταξινομημένες κατά itemId, ώστε το ίδιο καλάθι να
- * παράγει πάντα την ίδια κανονική μορφή.
+ * Milestone 3:
+ *   • Η ταυτότητα γραμμής είναι itemId + ΚΑΝΟΝΙΚΕΣ επιλογές (cartLineKey):
+ *     ίδιες επιλογές σε άλλη σειρά = ίδια γραμμή, άλλες επιλογές = άλλη.
+ *   • Το όριο ανά προϊόν (20) μετρά ΟΛΕΣ τις παραλλαγές του προϊόντος μαζί —
+ *     το «σπάσιμο» σε παραλλαγές δεν το παρακάμπτει.
+ *   • Κακόμορφες/διπλές επιλογές απορρίπτονται (δεν διορθώνονται σιωπηλά).
+ *
+ * Επιστρέφει γραμμές ταξινομημένες κατά κλειδί γραμμής, ώστε το ίδιο καλάθι
+ * να παράγει πάντα την ίδια κανονική μορφή.
  */
 export function validateAndMergeLines(raw: unknown): LinesValidationResult {
   if (!Array.isArray(raw) || raw.length === 0) {
@@ -329,7 +337,8 @@ export function validateAndMergeLines(raw: unknown): LinesValidationResult {
     };
   }
 
-  const merged = new Map<string, number>();
+  const merged = new Map<string, CheckoutLineInput>();
+  const perProduct = new Map<string, number>();
 
   for (const entry of raw) {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
@@ -354,15 +363,25 @@ export function validateAndMergeLines(raw: unknown): LinesValidationResult {
       };
     }
 
-    merged.set(line.itemId, (merged.get(line.itemId) ?? 0) + quantity);
+    const selections = canonicalizeSelections(line.selections);
+    if (!selections.ok) return { ok: false, error: selections.error };
+
+    const key = cartLineKey(line.itemId, selections.selections);
+    const existing = merged.get(key);
+    merged.set(key, {
+      itemId: line.itemId,
+      quantity: (existing?.quantity ?? 0) + quantity,
+      ...(selections.selections.length > 0 ? { selections: selections.selections } : {}),
+    });
+    perProduct.set(line.itemId, (perProduct.get(line.itemId) ?? 0) + quantity);
   }
 
   let totalUnits = 0;
-  for (const quantity of merged.values()) {
+  for (const quantity of perProduct.values()) {
     if (quantity > CHECKOUT_LIMITS.maxQuantityPerLine) {
       return {
         ok: false,
-        error: `Έως ${CHECKOUT_LIMITS.maxQuantityPerLine} τεμάχια ανά προϊόν.`,
+        error: `Έως ${CHECKOUT_LIMITS.maxQuantityPerLine} τεμάχια ανά προϊόν (μαζί με όλες τις παραλλαγές του).`,
       };
     }
     totalUnits += quantity;
@@ -375,9 +394,9 @@ export function validateAndMergeLines(raw: unknown): LinesValidationResult {
     };
   }
 
-  const lines = Array.from(merged, ([itemId, quantity]) => ({ itemId, quantity })).sort(
-    (a, b) => (a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0),
-  );
+  const lines = Array.from(merged, ([key, line]) => ({ key, line }))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    .map(({ line }) => line);
 
   return { ok: true, lines };
 }

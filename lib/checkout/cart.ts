@@ -6,9 +6,20 @@
  *    • computeCartTotals    — σύνολα με την ΙΔΙΑ αριθμητική που έχει ο server
  *    • removeSubmittedLines — αφαιρεί ΜΟΝΟ ό,τι στάλθηκε, κρατά νέες προσθήκες
  *    • applyQuoteToCart     — ενημερώνει τιμές/όρους από απάντηση του server
+ *
+ *  Milestone 3 — επιλογές προϊόντος:
+ *    • Η ταυτότητα γραμμής είναι lineKeyOf(line) = itemId + κανονικές
+ *      επιλογές. Ίδιο προϊόν με ίδιες επιλογές → μία γραμμή (ενώνονται οι
+ *      ποσότητες)· με άλλες επιλογές → ξεχωριστές γραμμές.
+ *    • Το όριο 20 τεμαχίων ισχύει ανά ΠΡΟΪΟΝ, για όλες τις παραλλαγές μαζί
+ *      (ίδιο με τον server).
+ *    • addLineToCart / replaceCartLine — προσθήκη και επεξεργασία γραμμής,
+ *      με ασφαλή ένωση όταν η επεξεργασία κάνει δύο γραμμές ίδιες.
  * ========================================================================== */
 
 import type {
+  MenuItem,
+  OptionSelection,
   CartLine,
   CartShopRef,
   CartState,
@@ -20,10 +31,19 @@ import { CHECKOUT_LIMITS } from "@/lib/checkout/constants";
 import {
   centsToEuros,
   computeTotalsCents,
+  parseItemPriceCents,
   parseShopTerms,
   toCents,
 } from "@/lib/checkout/money";
 import { cleanSingleLine, isValidDocumentId } from "@/lib/checkout/validation";
+import {
+  describeSelectionProblem,
+  lineKeyOf,
+  parseOptionSnapshot,
+  resolveSelections,
+  selectionsFromOptions,
+  validateOptionGroups,
+} from "@/lib/menu/options";
 
 export const EMPTY_CART: CartState = { shop: null, lines: [] };
 
@@ -64,6 +84,15 @@ function parseShopRef(raw: unknown): CartShopRef | null {
   };
 }
 
+function isDisplayPrice(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= CHECKOUT_LIMITS.maxItemPrice
+  );
+}
+
 function parseLine(raw: unknown): CartLine | null {
   if (typeof raw !== "object" || raw === null) return null;
   const line = raw as Record<string, unknown>;
@@ -72,16 +101,6 @@ function parseLine(raw: unknown): CartLine | null {
 
   const name = cleanSingleLine(line.name);
   if (!name || name.length > CHECKOUT_LIMITS.itemNameMax) return null;
-
-  const unitPrice = line.unitPrice;
-  if (
-    typeof unitPrice !== "number" ||
-    !Number.isFinite(unitPrice) ||
-    unitPrice < 0 ||
-    unitPrice > CHECKOUT_LIMITS.maxItemPrice
-  ) {
-    return null;
-  }
 
   const quantity = line.quantity;
   if (
@@ -93,7 +112,42 @@ function parseLine(raw: unknown): CartLine | null {
     return null;
   }
 
-  return { itemId: line.itemId, name, unitPrice, quantity };
+  /* Milestone 3: στιγμιότυπο επιλογών. Κακόμορφο → η γραμμή πετιέται (δεν
+   * μπορούμε να ξέρουμε τι είχε διαλέξει ο πελάτης — ούτε το «μαντεύουμε»). */
+  const options = parseOptionSnapshot(line.options);
+  if (options === null) return null;
+
+  if (options.length === 0) {
+    // Παλιό σχήμα (ή προϊόν χωρίς επιλογές): ακριβώς όπως πριν
+    if (!isDisplayPrice(line.unitPrice)) return null;
+    return { itemId: line.itemId, name, unitPrice: line.unitPrice, quantity };
+  }
+
+  if (!isDisplayPrice(line.basePrice)) return null;
+  /* Η τιμή μονάδας ΞΑΝΑΥΠΟΛΟΓΙΖΕΤΑΙ από βάση + επιλογές — δεν εμπιστευόμαστε
+   * το αποθηκευμένο unitPrice (απλώς για εμφάνιση· ο server τιμολογεί). */
+  const unitPriceCents =
+    toCents(line.basePrice) + options.reduce((sum, option) => sum + option.priceDeltaCents, 0);
+
+  return {
+    itemId: line.itemId,
+    name,
+    unitPrice: centsToEuros(unitPriceCents),
+    quantity,
+    basePrice: centsToEuros(toCents(line.basePrice)),
+    options,
+  };
+}
+
+/** Πόσα τεμάχια του ΠΡΟΪΟΝΤΟΣ (όλες οι παραλλαγές) έχει το καλάθι, εκτός από μία γραμμή */
+export function productQuantity(lines: readonly CartLine[], itemId: string, exceptKey?: string): number {
+  return lines.reduce(
+    (sum, line) =>
+      line.itemId === itemId && (exceptKey === undefined || lineKeyOf(line) !== exceptKey)
+        ? sum + line.quantity
+        : sum,
+    0,
+  );
 }
 
 /**
@@ -101,7 +155,9 @@ function parseLine(raw: unknown): CartLine | null {
  *
  * Πολιτική: χαλασμένο κατάστημα → άδειο καλάθι (δεν μπορούμε να ξέρουμε σε
  * ποιον ανήκουν τα προϊόντα). Χαλασμένες γραμμές → πετιούνται, οι υπόλοιπες
- * μένουν. Διπλότυπα → ενώνονται, με ταβάνι το όριο ανά προϊόν.
+ * μένουν. Διπλότυπα (ίδιο κλειδί γραμμής) → ενώνονται. Το όριο τεμαχίων ανά
+ * προϊόν μετρά όλες τις παραλλαγές: ό,τι περισσεύει κόβεται από τις
+ * τελευταίες γραμμές.
  */
 export function parseStoredCart(raw: string | null | undefined): CartState {
   if (!raw) return EMPTY_CART;
@@ -120,23 +176,150 @@ export function parseStoredCart(raw: string | null | undefined): CartState {
   if (!shop || !Array.isArray(value.lines)) return EMPTY_CART;
 
   const merged = new Map<string, CartLine>();
+  const perProduct = new Map<string, number>();
+
   for (const entry of value.lines) {
     const line = parseLine(entry);
     if (!line) continue;
 
-    const existing = merged.get(line.itemId);
+    const used = perProduct.get(line.itemId) ?? 0;
+    const allowed = Math.min(line.quantity, CHECKOUT_LIMITS.maxQuantityPerLine - used);
+    if (allowed <= 0) continue;
+
+    const key = lineKeyOf(line);
+    const existing = merged.get(key);
     if (existing) {
-      existing.quantity = Math.min(
-        existing.quantity + line.quantity,
-        CHECKOUT_LIMITS.maxQuantityPerLine,
-      );
+      existing.quantity += allowed;
     } else if (merged.size < CHECKOUT_LIMITS.maxLines) {
-      merged.set(line.itemId, { ...line });
+      merged.set(key, { ...line, quantity: allowed });
+    } else {
+      continue;
     }
+    perProduct.set(line.itemId, used + allowed);
   }
 
   const lines = Array.from(merged.values());
   return lines.length === 0 ? EMPTY_CART : { shop, lines };
+}
+
+/* ==========================================================================
+ *  ΠΡΟΣΘΗΚΗ / ΕΠΕΞΕΡΓΑΣΙΑ ΓΡΑΜΜΗΣ
+ * ========================================================================== */
+
+export type BuildCartLineResult =
+  | { ok: true; line: CartLine }
+  | { ok: false; message: string };
+
+/**
+ * Φτιάχνει γραμμή καλαθιού από το προϊόν ΟΠΩΣ το έδειξε ο κατάλογος και τα
+ * ids που διάλεξε ο πελάτης. Η τιμή εδώ είναι μόνο για εμφάνιση· ο server
+ * ξαναϋπολογίζει τα πάντα από τα ids.
+ */
+export function buildCartLine(
+  item: Pick<MenuItem, "id" | "name" | "price" | "optionGroups" | "available">,
+  selections: readonly OptionSelection[],
+  quantity: number,
+): BuildCartLineResult {
+  const name = cleanSingleLine(item.name).slice(0, CHECKOUT_LIMITS.itemNameMax);
+  if (!isValidDocumentId(item.id) || !name || item.available === false) {
+    return { ok: false, message: "Το προϊόν δεν είναι διαθέσιμο." };
+  }
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > CHECKOUT_LIMITS.maxQuantityPerLine) {
+    return { ok: false, message: `Η ποσότητα είναι από 1 έως ${CHECKOUT_LIMITS.maxQuantityPerLine}.` };
+  }
+
+  const baseCents = parseItemPriceCents(item.price);
+  const config = validateOptionGroups(item.optionGroups, "read");
+  if (baseCents === null || !config.ok) {
+    return { ok: false, message: "Το προϊόν δεν μπορεί να παραγγελθεί αυτή τη στιγμή." };
+  }
+
+  const resolved = resolveSelections(config.groups, selections);
+  if (!resolved.ok) return { ok: false, message: describeSelectionProblem(resolved.problem, name) };
+
+  if (resolved.options.length === 0) {
+    return { ok: true, line: { itemId: item.id, name, unitPrice: centsToEuros(baseCents), quantity } };
+  }
+  return {
+    ok: true,
+    line: {
+      itemId: item.id,
+      name,
+      unitPrice: centsToEuros(baseCents + resolved.extraCents),
+      quantity,
+      basePrice: centsToEuros(baseCents),
+      options: resolved.options,
+    },
+  };
+}
+
+export type CartLineChange =
+  | { ok: true; cart: CartState; merged: boolean }
+  | { ok: false; reason: "product_limit" | "line_limit" | "not_found" };
+
+/**
+ * Προσθέτει γραμμή (ΙΔΙΟ κατάστημα — η σύγκρουση καταστημάτων λύνεται πιο
+ * πάνω, στο CartContext). Ίδιο κλειδί → ενώνονται οι ποσότητες.
+ */
+export function addLineToCart(current: CartState, shop: CartShopRef, line: CartLine): CartLineChange {
+  const lines = current.shop?.id === shop.id ? current.lines : [];
+  const key = lineKeyOf(line);
+
+  if (productQuantity(lines, line.itemId) + line.quantity > CHECKOUT_LIMITS.maxQuantityPerLine) {
+    return { ok: false, reason: "product_limit" };
+  }
+
+  const existing = lines.find((entry) => lineKeyOf(entry) === key);
+  if (!existing && lines.length >= CHECKOUT_LIMITS.maxLines) {
+    return { ok: false, reason: "line_limit" };
+  }
+
+  const nextLines = existing
+    ? lines.map((entry) =>
+        entry === existing
+          ? { ...line, quantity: existing.quantity + line.quantity }
+          : entry,
+      )
+    : [...lines, line];
+
+  return { ok: true, cart: { shop, lines: nextLines }, merged: Boolean(existing) };
+}
+
+/**
+ * Επεξεργασία γραμμής (επιλογές και/ή ποσότητα).
+ *
+ * Αν οι ΝΕΕΣ επιλογές συμπίπτουν με ΑΛΛΗ γραμμή του καλαθιού, οι δύο γραμμές
+ * ενώνονται σε μία, στη θέση της γραμμής που επεξεργάστηκε ο πελάτης, με
+ * άθροισμα ποσοτήτων. Το άθροισμα δεν μπορεί να ξεπεράσει το όριο ανά
+ * προϊόν, γιατί και οι δύο γραμμές είναι ήδη του ίδιου προϊόντος.
+ */
+export function replaceCartLine(current: CartState, oldKey: string, next: CartLine): CartLineChange {
+  const index = current.lines.findIndex((line) => lineKeyOf(line) === oldKey);
+  if (index === -1 || !current.shop) return { ok: false, reason: "not_found" };
+
+  const original = current.lines[index];
+  if (original.itemId !== next.itemId) return { ok: false, reason: "not_found" };
+
+  const others = productQuantity(current.lines, next.itemId, oldKey);
+  if (others + next.quantity > CHECKOUT_LIMITS.maxQuantityPerLine) {
+    return { ok: false, reason: "product_limit" };
+  }
+
+  const newKey = lineKeyOf(next);
+  const collision =
+    newKey === oldKey ? -1 : current.lines.findIndex((line) => lineKeyOf(line) === newKey);
+
+  if (collision === -1) {
+    const lines = current.lines.map((line, position) => (position === index ? next : line));
+    return { ok: true, cart: { shop: current.shop, lines }, merged: false };
+  }
+
+  const target = current.lines[collision];
+  const mergedLine: CartLine = { ...next, quantity: next.quantity + target.quantity };
+  const lines = current.lines
+    .map((line, position) => (position === index ? mergedLine : line))
+    .filter((_, position) => position !== collision);
+  return { ok: true, cart: { shop: current.shop, lines }, merged: true };
 }
 
 /* ==========================================================================
@@ -199,7 +382,10 @@ export function snapshotCart(cart: CartState): SubmittedCartSnapshot | null {
   if (!cart.shop || cart.lines.length === 0) return null;
   return {
     shopId: cart.shop.id,
-    lines: cart.lines.map((line) => ({ ...line })),
+    lines: cart.lines.map((line) => ({
+      ...line,
+      ...(line.options ? { options: line.options.map((option) => ({ ...option })) } : {}),
+    })),
   };
 }
 
@@ -214,18 +400,18 @@ export function removeSubmittedLines(
 ): CartState {
   if (!current.shop || current.shop.id !== submitted.shopId) return current;
 
+  /* Milestone 3: ανά ΓΡΑΜΜΗ (itemId + επιλογές), όχι ανά προϊόν — μια άλλη
+   * παραλλαγή του ίδιου προϊόντος που προστέθηκε στο μεταξύ μένει άθικτη. */
   const submittedQuantities = new Map<string, number>();
   for (const line of submitted.lines) {
-    submittedQuantities.set(
-      line.itemId,
-      (submittedQuantities.get(line.itemId) ?? 0) + line.quantity,
-    );
+    const key = lineKeyOf(line);
+    submittedQuantities.set(key, (submittedQuantities.get(key) ?? 0) + line.quantity);
   }
 
   const remaining = current.lines
     .map((line) => ({
       ...line,
-      quantity: line.quantity - (submittedQuantities.get(line.itemId) ?? 0),
+      quantity: line.quantity - (submittedQuantities.get(lineKeyOf(line)) ?? 0),
     }))
     .filter((line) => line.quantity > 0);
 
@@ -240,7 +426,7 @@ export function removeSubmittedLines(
 export function applyQuoteToCart(current: CartState, quote: CheckoutQuote): CartState {
   if (!current.shop || current.shop.id !== quote.shopId) return current;
 
-  const verified = new Map(quote.lines.map((line) => [line.itemId, line]));
+  const verified = new Map(quote.lines.map((line) => [lineKeyOf(line), line]));
 
   return {
     shop: {
@@ -251,13 +437,32 @@ export function applyQuoteToCart(current: CartState, quote: CheckoutQuote): Cart
       freeDeliveryOver: quote.shopTerms.freeDeliveryOver,
     },
     lines: current.lines.map((line) => {
-      const match = verified.get(line.itemId);
-      return match ? { ...line, name: match.name, unitPrice: match.unitPrice } : line;
+      const match = verified.get(lineKeyOf(line));
+      if (!match) return line;
+      /* Milestone 3: και οι ετικέτες/προσαυξήσεις των επιλογών παίρνουν τις
+       * εξουσιοδοτημένες τιμές (ίδια ids — μόνο κείμενα/ποσά αλλάζουν). */
+      return match.options && match.options.length > 0 && match.basePrice !== undefined
+        ? {
+            ...line,
+            name: match.name,
+            unitPrice: match.unitPrice,
+            basePrice: match.basePrice,
+            options: match.options.map((option) => ({ ...option })),
+          }
+        : { ...line, name: match.name, unitPrice: match.unitPrice };
     }),
   };
 }
 
-/** Μόνο ids και ποσότητες — αυτά στέλνονται στον server, τίποτε άλλο */
+/**
+ * Μόνο ids, ποσότητες και ids επιλογών — αυτά στέλνονται στον server,
+ * τίποτε άλλο. Ετικέτες και τιμές επιλογών ΔΕΝ φεύγουν ποτέ από τον browser.
+ */
 export function toRequestLines(lines: CartLine[]): CheckoutLineInput[] {
-  return lines.map((line) => ({ itemId: line.itemId, quantity: line.quantity }));
+  return lines.map((line) => {
+    const selections = line.options ? selectionsFromOptions(line.options) : [];
+    return selections.length > 0
+      ? { itemId: line.itemId, quantity: line.quantity, selections }
+      : { itemId: line.itemId, quantity: line.quantity };
+  });
 }

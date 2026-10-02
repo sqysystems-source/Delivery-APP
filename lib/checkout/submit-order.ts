@@ -18,6 +18,7 @@ import type {
   CheckoutRequest,
   CheckoutSuccess,
 } from "@/types";
+import { parseOptionSnapshot } from "@/lib/menu/options";
 import { auth, ensureSignedIn } from "@/lib/firebase";
 
 export const CHECKOUT_ENDPOINT = "/api/orders";
@@ -34,6 +35,8 @@ export class CheckoutError extends Error {
   readonly fieldErrors?: CheckoutFieldErrors;
   readonly quote?: CheckoutQuote;
   readonly itemId?: string;
+  /** Milestone 3: option_unavailable / options_changed — ποια γραμμή */
+  readonly lineKey?: string;
   readonly existingOrder?: { orderId: string; code: string };
   /**
    * true όταν ΔΕΝ ξέρουμε αν δημιουργήθηκε παραγγελία (χάθηκε η απάντηση,
@@ -50,6 +53,7 @@ export class CheckoutError extends Error {
     fieldErrors?: CheckoutFieldErrors;
     quote?: CheckoutQuote;
     itemId?: string;
+    lineKey?: string;
     existingOrder?: { orderId: string; code: string };
   }) {
     super(options.message);
@@ -60,6 +64,7 @@ export class CheckoutError extends Error {
     this.fieldErrors = options.fieldErrors;
     this.quote = options.quote;
     this.itemId = options.itemId;
+    this.lineKey = options.lineKey;
     this.existingOrder = options.existingOrder;
   }
 }
@@ -93,7 +98,10 @@ function isQuote(value: unknown): value is CheckoutQuote {
         typeof (line as Record<string, unknown>).name === "string" &&
         isNumber((line as Record<string, unknown>).unitPrice) &&
         isNumber((line as Record<string, unknown>).quantity) &&
-        isNumber((line as Record<string, unknown>).lineTotal),
+        isNumber((line as Record<string, unknown>).lineTotal) &&
+        /* Milestone 3: στιγμιότυπο επιλογών, όταν υπάρχει, πρέπει να διαβάζεται */
+        ((line as Record<string, unknown>).options === undefined ||
+          parseOptionSnapshot((line as Record<string, unknown>).options) !== null),
     ) &&
     isNumber(quote.subtotal) &&
     isNumber(quote.deliveryFee) &&
@@ -253,6 +261,7 @@ export async function submitOrder(
       fieldErrors: body.fieldErrors,
       quote: isQuote(body.quote) ? body.quote : undefined,
       itemId: typeof body.itemId === "string" ? body.itemId : undefined,
+      lineKey: typeof body.lineKey === "string" ? body.lineKey : undefined,
       existingOrder:
         body.existingOrder &&
         typeof body.existingOrder.orderId === "string" &&

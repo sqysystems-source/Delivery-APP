@@ -38,14 +38,22 @@ import {
 import { useAuth } from "@/context/AuthContext";
 import {
   EMPTY_CART,
+  addLineToCart,
   applyQuoteToCart,
+  buildCartLine,
   computeCartTotals,
   parseStoredCart,
+  productQuantity,
   removeSubmittedLines,
+  replaceCartLine,
+  type CartLineChange,
   type SubmittedCartSnapshot,
 } from "@/lib/checkout/cart";
 import { CHECKOUT_LIMITS } from "@/lib/checkout/constants";
+import { lineKeyOf } from "@/lib/menu/options";
+import { lockScroll } from "@/lib/scroll-lock";
 import type {
+  CartLine,
   CartShopRef,
   CartState,
   CartTotals,
@@ -138,13 +146,24 @@ type CartContextValue = {
   /** true μόλις διαβαστεί το αποθηκευμένο καλάθι — πριν από αυτό μην αποφασίζεις τίποτα */
   hydrated: boolean;
 
-  /* Ενέργειες καλαθιού */
+  /* Ενέργειες καλαθιού
+   *
+   * Milestone 3: increase/decrease/removeLine δέχονται το ΚΛΕΙΔΙ ΓΡΑΜΜΗΣ
+   * (lineKeyOf). Για προϊόντα χωρίς επιλογές το κλειδί είναι το ίδιο το
+   * itemId, οπότε οι παλιές κλήσεις με itemId λειτουργούν όπως πριν. */
+  /** Γρήγορη προσθήκη 1 τεμαχίου — ΜΟΝΟ για προϊόντα χωρίς επιλογές */
   addItem: (item: MenuItem, shop: Shop) => void;
-  increase: (itemId: string) => void;
-  decrease: (itemId: string) => void;
-  removeLine: (itemId: string) => void;
+  /** Προσθήκη γραμμής από τον διάλογο επιλογών (με σύγκρουση καταστήματος) */
+  addConfiguredLine: (item: MenuItem, shop: Shop, line: CartLine) => CartAddResult;
+  /** Επεξεργασία γραμμής — ενώνει με άλλη γραμμή αν γίνουν ίδιες */
+  updateLine: (lineKey: string, line: CartLine) => CartLineChange;
+  increase: (lineKey: string) => void;
+  decrease: (lineKey: string) => void;
+  removeLine: (lineKey: string) => void;
+  /** Αφαιρεί ΟΛΕΣ τις παραλλαγές ενός προϊόντος (π.χ. προϊόν που καταργήθηκε) */
+  removeItemLines: (itemId: string) => void;
   clearCart: () => void;
-  /** Ποσότητα ενός προϊόντος στο καλάθι (0 όταν δεν υπάρχει) */
+  /** Ποσότητα ενός προϊόντος στο καλάθι, όλες οι παραλλαγές μαζί (0 όταν δεν υπάρχει) */
   getQuantity: (itemId: string) => number;
 
   /* Drawer / bottom sheet */
@@ -171,6 +190,12 @@ type CartContextValue = {
   /** Μετά από ΕΠΙΤΥΧΙΑ: αφαιρεί ΜΟΝΟ ό,τι στάλθηκε και καθαρίζει τα σχόλια */
   completeSubmittedOrder: (snapshot: SubmittedCartSnapshot) => void;
 };
+
+export type CartAddResult =
+  | { ok: true; merged: boolean }
+  | { ok: false; reason: "product_limit" | "line_limit" | "not_found" }
+  /** Το καλάθι έχει άλλο κατάστημα — περιμένει επιβεβαίωση (pendingItem) */
+  | { ok: "pending" };
 
 const CartContext = createContext<CartContextValue | null>(null);
 
@@ -219,80 +244,95 @@ export function CartProvider({ children }: { children: ReactNode }) {
 
   /* --------------------- Κλείδωμα scroll όταν ανοίγει ------------------- */
   useEffect(() => {
-    const locked = isCartOpen || pendingItem !== null;
-    document.body.style.overflow = locked ? "hidden" : "";
-    return () => {
-      document.body.style.overflow = "";
-    };
+    if (!isCartOpen && pendingItem === null) return;
+    // Μετρητής: ένας διάλογος επιλογών πάνω από το καλάθι δεν το ξεκλειδώνει
+    return lockScroll();
   }, [isCartOpen, pendingItem]);
 
   /* ------------------------------ Σύνολα -------------------------------- */
   const totals = useMemo(() => computeCartTotals(cart), [cart]);
 
   /* ----------------------------- Ενέργειες ------------------------------ */
-  const commitItem = useCallback(
-    (item: MenuItem, shop: Shop) => {
+  /** Γράφει μια ΗΔΗ διαμορφωμένη γραμμή στο καλάθι του καταστήματος */
+  const commitLine = useCallback(
+    (line: CartLine, shop: Shop): CartLineChange => {
+      let outcome: CartLineChange = { ok: false, reason: "not_found" };
       store.update((previous) => {
         const sameShop = previous.shop?.id === shop.id;
-        const lines = sameShop ? previous.lines : [];
-        const existing = lines.find((line) => line.itemId === item.id);
-
-        if (existing && existing.quantity >= CHECKOUT_LIMITS.maxQuantityPerLine) {
-          return previous;
-        }
-        if (!existing && lines.length >= CHECKOUT_LIMITS.maxLines) {
-          return previous;
-        }
-
-        const nextLines = existing
-          ? lines.map((line) =>
-              line.itemId === item.id ? { ...line, quantity: line.quantity + 1 } : line,
-            )
-          : [...lines, { itemId: item.id, name: item.name, unitPrice: item.price, quantity: 1 }];
-
-        return { shop: toCartShopRef(shop), lines: nextLines };
+        outcome = addLineToCart(sameShop ? previous : EMPTY_CART, toCartShopRef(shop), line);
+        return outcome.ok ? outcome.cart : previous;
       });
+      return outcome;
+    },
+    [store],
+  );
+
+  const commitItem = useCallback(
+    (item: MenuItem, shop: Shop) => {
+      const built = buildCartLine(item, [], 1);
+      if (built.ok) commitLine(built.line, shop);
+    },
+    [commitLine],
+  );
+
+  const hasOtherShop = useCallback(
+    (shop: Shop) => {
+      const current = store.getSnapshot();
+      return current.shop !== null && current.shop.id !== shop.id && current.lines.length > 0;
     },
     [store],
   );
 
   const addItem = useCallback(
     (item: MenuItem, shop: Shop) => {
-      const current = store.getSnapshot();
-      const hasOtherShop =
-        current.shop !== null && current.shop.id !== shop.id && current.lines.length > 0;
-
-      if (hasOtherShop) {
+      if (hasOtherShop(shop)) {
         setPendingItem({ item, shop });
         return;
       }
       commitItem(item, shop);
     },
-    [store, commitItem],
+    [hasOtherShop, commitItem],
+  );
+
+  const addConfiguredLine = useCallback(
+    (item: MenuItem, shop: Shop, line: CartLine): CartAddResult => {
+      if (hasOtherShop(shop)) {
+        setPendingItem({ item, shop, line });
+        return { ok: "pending" };
+      }
+      const outcome = commitLine(line, shop);
+      return outcome.ok ? { ok: true, merged: outcome.merged } : outcome;
+    },
+    [hasOtherShop, commitLine],
   );
 
   const confirmPendingItem = useCallback(() => {
     if (!pendingItem) return;
     store.update(() => EMPTY_CART);
     setOrderNotes("");
-    commitItem(pendingItem.item, pendingItem.shop);
+    if (pendingItem.line) commitLine(pendingItem.line, pendingItem.shop);
+    else commitItem(pendingItem.item, pendingItem.shop);
     setPendingItem(null);
-  }, [pendingItem, store, commitItem]);
+  }, [pendingItem, store, commitItem, commitLine]);
 
   const cancelPendingItem = useCallback(() => setPendingItem(null), []);
 
   const changeQuantity = useCallback(
-    (itemId: string, delta: number) => {
+    (lineKey: string, delta: number) => {
       store.update((previous) => {
+        const target = previous.lines.find((line) => lineKeyOf(line) === lineKey);
+        if (!target) return previous;
+
+        /* Όριο ανά ΠΡΟΪΟΝ: όλες οι παραλλαγές μαζί (ίδιο με τον server) */
+        const others = productQuantity(previous.lines, target.itemId, lineKey);
+        const quantity = Math.min(
+          target.quantity + delta,
+          CHECKOUT_LIMITS.maxQuantityPerLine - others,
+        );
+        if (quantity === target.quantity) return previous;
+
         const nextLines = previous.lines
-          .map((line) =>
-            line.itemId === itemId
-              ? {
-                  ...line,
-                  quantity: Math.min(line.quantity + delta, CHECKOUT_LIMITS.maxQuantityPerLine),
-                }
-              : line,
-          )
+          .map((line) => (line === target ? { ...line, quantity } : line))
           .filter((line) => line.quantity > 0);
 
         return nextLines.length === 0 ? EMPTY_CART : { ...previous, lines: nextLines };
@@ -301,15 +341,39 @@ export function CartProvider({ children }: { children: ReactNode }) {
     [store],
   );
 
-  const increase = useCallback((itemId: string) => changeQuantity(itemId, 1), [changeQuantity]);
-  const decrease = useCallback((itemId: string) => changeQuantity(itemId, -1), [changeQuantity]);
+  const increase = useCallback((lineKey: string) => changeQuantity(lineKey, 1), [changeQuantity]);
+  const decrease = useCallback((lineKey: string) => changeQuantity(lineKey, -1), [changeQuantity]);
 
   const removeLine = useCallback(
+    (lineKey: string) => {
+      store.update((previous) => {
+        const nextLines = previous.lines.filter((line) => lineKeyOf(line) !== lineKey);
+        if (nextLines.length === previous.lines.length) return previous;
+        return nextLines.length === 0 ? EMPTY_CART : { ...previous, lines: nextLines };
+      });
+    },
+    [store],
+  );
+
+  const removeItemLines = useCallback(
     (itemId: string) => {
       store.update((previous) => {
         const nextLines = previous.lines.filter((line) => line.itemId !== itemId);
+        if (nextLines.length === previous.lines.length) return previous;
         return nextLines.length === 0 ? EMPTY_CART : { ...previous, lines: nextLines };
       });
+    },
+    [store],
+  );
+
+  const updateLine = useCallback(
+    (lineKey: string, line: CartLine): CartLineChange => {
+      let outcome: CartLineChange = { ok: false, reason: "not_found" };
+      store.update((previous) => {
+        outcome = replaceCartLine(previous, lineKey, line);
+        return outcome.ok ? outcome.cart : previous;
+      });
+      return outcome;
     },
     [store],
   );
@@ -320,7 +384,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
   }, [store]);
 
   const getQuantity = useCallback(
-    (itemId: string) => cart.lines.find((line) => line.itemId === itemId)?.quantity ?? 0,
+    (itemId: string) => productQuantity(cart.lines, itemId),
     [cart.lines],
   );
 
@@ -352,9 +416,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
       totals,
       hydrated,
       addItem,
+      addConfiguredLine,
+      updateLine,
       increase,
       decrease,
       removeLine,
+      removeItemLines,
       clearCart,
       getQuantity,
       isCartOpen,
@@ -375,9 +442,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
       totals,
       hydrated,
       addItem,
+      addConfiguredLine,
+      updateLine,
       increase,
       decrease,
       removeLine,
+      removeItemLines,
       clearCart,
       getQuantity,
       isCartOpen,

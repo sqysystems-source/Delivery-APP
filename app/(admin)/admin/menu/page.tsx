@@ -280,6 +280,14 @@ export default function AdminMenuPage() {
                             Προσφορά
                           </span>
                         )}
+                        {/* Milestone 3: προϊόν με επιλογές */}
+                        {Array.isArray(item.optionGroups) && item.optionGroups.length > 0 && (
+                          <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-sky-700">
+                            {item.optionGroups.length === 1
+                              ? "1 ομάδα επιλογών"
+                              : `${item.optionGroups.length} ομάδες επιλογών`}
+                          </span>
+                        )}
                       </div>
                       {item.description && (
                         <p className="mt-0.5 line-clamp-1 text-sm text-gray-500">

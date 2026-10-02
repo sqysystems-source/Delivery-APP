@@ -5,6 +5,7 @@ import {
   type CheckoutStore,
 } from "@/lib/server/checkout-service";
 import type { CheckoutErrorBody, CheckoutSuccess } from "@/types";
+import { CHECKOUT_LIMITS } from "@/lib/checkout/constants";
 import { FakeCheckoutDb, SERVER_TIMESTAMP } from "./fake-checkout-store";
 
 /* ==========================================================================
@@ -264,7 +265,7 @@ describe("άκυρα δεδομένα πελάτη/παράδοσης", () => {
   it("άκυρο JSON → 400, υπερβολικό μέγεθος → 413", async () => {
     expect((await call("{όχι json")).status).toBe(400);
     expect(asError((await call("{όχι json")).body).code).toBe("invalid_json");
-    expect((await call(JSON.stringify({ pad: "x".repeat(20_000) }))).status).toBe(413);
+    expect((await call(JSON.stringify({ pad: "x".repeat(CHECKOUT_LIMITS.maxRequestBytes + 1) }))).status).toBe(413);
   });
 
   it("χωρίς ή με άκυρο token → 401", async () => {

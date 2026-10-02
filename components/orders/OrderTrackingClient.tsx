@@ -31,6 +31,7 @@ import {
   Store,
   WifiOff,
 } from "lucide-react";
+import LineOptionsSummary from "@/components/options/LineOptionsSummary";
 import OrderStatusProgress from "@/components/orders/OrderStatusProgress";
 import { useAuth } from "@/context/AuthContext";
 import { useOrderTracking } from "@/hooks/useOrderTracking";
@@ -337,10 +338,12 @@ function OrderDetails({
           Τι παρήγγειλες
         </h2>
         <ul className="mt-2 divide-y divide-gray-100">
-          {order.lines.map((line) => (
-            <li key={line.itemId} className="flex items-start justify-between gap-3 py-2.5">
+          {order.lines.map((line, index) => (
+            <li key={`${index}-${line.itemId}`} className="flex items-start justify-between gap-3 py-2.5">
               <span className="text-sm text-gray-800">
                 <span className="font-bold">{line.quantity}×</span> {line.name}
+                {/* Milestone 3: στιγμιότυπο της παραγγελίας, όχι ο σημερινός κατάλογος */}
+                <LineOptionsSummary options={line.options} />
               </span>
               <span className="shrink-0 text-sm font-bold text-gray-900">
                 {formatPrice(line.lineTotal)}

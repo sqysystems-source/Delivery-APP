@@ -46,6 +46,10 @@ import type {
  * το πλήρες, επαληθευμένο αποτέλεσμα του server). Εξάγεται και από εδώ, ώστε
  * το data layer να παραμένει το ένα σημείο εισόδου. */
 export { submitOrder, CheckoutError } from "@/lib/checkout/submit-order";
+/* Milestone 3: ένα προϊόν όπως είναι ΤΩΡΑ (για «Επεξεργασία επιλογών»). Ζει σε
+ * δικό του module χωρίς αρχικοποίηση σε επίπεδο module, ώστε να το φορτώνουν
+ * το καλάθι και το checkout χωρίς να φορτώνουν όλο το data layer. */
+export { fetchMenuItem } from "@/lib/menu/fetch-menu-item";
 
 /* --------------------------------------------------------------------------
  *  Converters

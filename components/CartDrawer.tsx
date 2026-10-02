@@ -19,6 +19,12 @@
  *  Το καλάθι ΔΕΝ υποβάλλει πια παραγγελία. Και στο κινητό (bottom sheet) και
  *  στο desktop (CartPanel) το κουμπί οδηγεί στο /checkout, όπου ο πελάτης
  *  συμπληρώνει στοιχεία, βλέπει τη σύνοψη και επιβεβαιώνει ρητά.
+ *
+ *  ── ΕΠΙΛΟΓΕΣ (milestone 3) ──────────────────────────────────────────────
+ *  Κάθε γραμμή αναγνωρίζεται από itemId + επιλογές (lineKeyOf). Κάτω από το
+ *  όνομα φαίνονται μέγεθος/έξτρα/αφαιρέσεις, και οι γραμμές με επιλογές έχουν
+ *  «Επεξεργασία» (EditCartLineDialog). Το «+» σέβεται το όριο ανά προϊόν για
+ *  όλες τις παραλλαγές μαζί.
  * ========================================================================== */
 
 import { useState } from "react";
@@ -29,13 +35,20 @@ import {
   ChevronRight,
   MapPin,
   Minus,
+  Pencil,
   Plus,
   ShoppingBag,
   Trash2,
   X,
 } from "lucide-react";
+import EditCartLineDialog from "@/components/options/EditCartLineDialog";
+import LineOptionsSummary from "@/components/options/LineOptionsSummary";
 import { useCart } from "@/context/CartContext";
+import { productQuantity } from "@/lib/checkout/cart";
 import { CHECKOUT_LIMITS } from "@/lib/checkout/constants";
+import { centsToEuros, toCents } from "@/lib/checkout/money";
+import { lineKeyOf } from "@/lib/menu/options";
+import type { CartLine } from "@/types";
 import { cn, formatDeliveryFee, formatPrice } from "@/lib/format";
 
 const CHECKOUT_PATH = "/checkout";
@@ -251,6 +264,8 @@ export function CartPanel({ className }: { className?: string }) {
 
 export function CartLines() {
   const { cart, hydrated, increase, decrease, removeLine } = useCart();
+  const [editing, setEditing] = useState<CartLine | null>(null);
+  const [announcement, setAnnouncement] = useState("");
 
   /* ----------------------- Φόρτωση από storage ---------------------- */
   if (!hydrated) {
@@ -285,58 +300,96 @@ export function CartLines() {
 
   /* --------------------------- Γραμμές ------------------------------ */
   return (
-    <ul className="space-y-3">
-      {cart.lines.map((line) => (
-        <li
-          key={line.itemId}
-          className="flex items-start gap-3 rounded-2xl border border-gray-100 p-3 transition-colors duration-300 hover:border-orange-200 hover:bg-orange-50/40"
-        >
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-bold text-gray-900">{line.name}</p>
-            <p className="mt-0.5 text-xs text-gray-500">
-              {formatPrice(line.unitPrice)} / τεμ.
-            </p>
+    <>
+      <p className="sr-only" role="status" aria-live="polite">
+        {announcement}
+      </p>
+      <ul className="space-y-3">
+        {cart.lines.map((line) => {
+          const key = lineKeyOf(line);
+          const atProductLimit =
+            productQuantity(cart.lines, line.itemId) >= CHECKOUT_LIMITS.maxQuantityPerLine;
+          const hasOptions = Boolean(line.options && line.options.length > 0);
 
-            <div className="mt-2.5 flex w-fit items-center gap-1 rounded-full border border-gray-200 bg-white p-1">
-              <button
-                type="button"
-                onClick={() => decrease(line.itemId)}
-                aria-label={`Μείωση ποσότητας για ${line.name}`}
-                className="flex h-7 w-7 items-center justify-center rounded-full text-gray-600 transition-colors hover:bg-gray-100 hover:text-orange-600"
-              >
-                <Minus className="h-3.5 w-3.5" />
-              </button>
-              <span className="min-w-5 text-center text-sm font-black text-gray-900">
-                {line.quantity}
-              </span>
-              <button
-                type="button"
-                onClick={() => increase(line.itemId)}
-                disabled={line.quantity >= CHECKOUT_LIMITS.maxQuantityPerLine}
-                aria-label={`Αύξηση ποσότητας για ${line.name}`}
-                className="flex h-7 w-7 items-center justify-center rounded-full bg-orange-500 text-white transition-colors hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-gray-300"
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-
-          <div className="flex shrink-0 flex-col items-end gap-2">
-            <span className="text-sm font-black text-gray-900">
-              {formatPrice(line.unitPrice * line.quantity)}
-            </span>
-            <button
-              type="button"
-              onClick={() => removeLine(line.itemId)}
-              aria-label={`Αφαίρεση ${line.name} από το καλάθι`}
-              className="flex h-7 w-7 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-red-50 hover:text-red-500"
+          return (
+            <li
+              key={key}
+              className="flex items-start gap-3 rounded-2xl border border-gray-100 p-3 transition-colors duration-300 hover:border-orange-200 hover:bg-orange-50/40"
             >
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </div>
-        </li>
-      ))}
-    </ul>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-bold text-gray-900">{line.name}</p>
+                <LineOptionsSummary options={line.options} />
+                <p className="mt-0.5 text-xs text-gray-500">
+                  {formatPrice(line.unitPrice)} / τεμ.
+                </p>
+
+                <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                  <div className="flex w-fit items-center gap-1 rounded-full border border-gray-200 bg-white p-1">
+                    <button
+                      type="button"
+                      onClick={() => decrease(key)}
+                      aria-label={`Μείωση ποσότητας για ${line.name}`}
+                      className="flex h-7 w-7 items-center justify-center rounded-full text-gray-600 transition-colors hover:bg-gray-100 hover:text-orange-600"
+                    >
+                      <Minus className="h-3.5 w-3.5" />
+                    </button>
+                    <span className="min-w-5 text-center text-sm font-black text-gray-900">
+                      {line.quantity}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => increase(key)}
+                      disabled={atProductLimit}
+                      aria-label={`Αύξηση ποσότητας για ${line.name}`}
+                      className="flex h-7 w-7 items-center justify-center rounded-full bg-orange-500 text-white transition-colors hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-gray-300"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  {hasOptions && cart.shop && (
+                    <button
+                      type="button"
+                      onClick={() => setEditing(line)}
+                      aria-haspopup="dialog"
+                      aria-label={`Επεξεργασία επιλογών για ${line.name}`}
+                      className="flex items-center gap-1 rounded-full px-2.5 py-1.5 text-xs font-bold text-orange-600 transition-colors hover:bg-orange-50"
+                    >
+                      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                      Επεξεργασία
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex shrink-0 flex-col items-end gap-2">
+                <span className="text-sm font-black text-gray-900">
+                  {formatPrice(centsToEuros(toCents(line.unitPrice) * line.quantity))}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeLine(key)}
+                  aria-label={`Αφαίρεση ${line.name} από το καλάθι`}
+                  className="flex h-7 w-7 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-red-50 hover:text-red-500"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+
+      {editing && cart.shop && (
+        <EditCartLineDialog
+          key={lineKeyOf(editing)}
+          shopId={cart.shop.id}
+          line={editing}
+          onClose={() => setEditing(null)}
+          onSaved={setAnnouncement}
+        />
+      )}
+    </>
   );
 }
 
@@ -366,7 +419,7 @@ export function CartSummary() {
             onChange={(event) => setOrderNotes(event.target.value)}
             rows={2}
             maxLength={CHECKOUT_LIMITS.maxNotesLength}
-            placeholder="π.χ. χωρίς κρεμμύδι, έξτρα σάλτσα…"
+            placeholder="π.χ. χρειαζόμαστε μαχαιροπίρουνα"
             className="w-full resize-none rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-orange-400"
           />
         </div>

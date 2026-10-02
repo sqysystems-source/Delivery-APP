@@ -6,10 +6,19 @@
  *  Γραμμή προϊόντος στον κατάλογο του καταστήματος.
  *  Το κουμπί «Προσθήκη» μετατρέπεται σε stepper −/+ μόλις το προϊόν μπει
  *  στο καλάθι. Όλη η λογική περνά από το useCart().
+ *
+ *  Milestone 3: προϊόν ΜΕ επιλογές ανοίγει πρώτα τον διάλογο επιλογών
+ *  (ProductOptionsDialog). Δεν έχει stepper −/+, γιατί μπορεί να υπάρχουν
+ *  πολλές παραλλαγές στο καλάθι· δείχνει πόσα τεμάχια έχεις συνολικά και
+ *  το «+» ανοίγει ξανά τον διάλογο. Προϊόντα ΧΩΡΙΣ επιλογές μένουν ίδια.
  * ========================================================================== */
 
-import { Flame, Minus, Plus } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Flame, Minus, Plus, SlidersHorizontal } from "lucide-react";
+import ProductOptionsDialog from "@/components/options/ProductOptionsDialog";
 import { useCart } from "@/context/CartContext";
+import { CHECKOUT_LIMITS } from "@/lib/checkout/constants";
+import { isConfigurationOrderable, validateOptionGroups } from "@/lib/menu/options";
 import { cn, formatPrice } from "@/lib/format";
 import type { MenuItem, Shop } from "@/types";
 
@@ -25,10 +34,17 @@ export default function MenuItemRow({
   shop,
   fallbackEmoji = "🍽️",
 }: MenuItemRowProps) {
-  const { addItem, decrease, getQuantity, hydrated } = useCart();
+  const { addItem, addConfiguredLine, decrease, getQuantity, hydrated } = useCart();
+  const [customizing, setCustomizing] = useState(false);
+
+  /* Επιλογές όπως τις έδωσε ο κατάλογος — κακόμορφες = μη παραγγελιοδοτήσιμο
+   * (ο server θα το απέρριπτε· δεν το προσθέτουμε «χωρίς επιλογές») */
+  const config = useMemo(() => validateOptionGroups(item.optionGroups, "read"), [item.optionGroups]);
+  const hasOptions = !config.ok || config.groups.length > 0;
+  const optionsBroken = !config.ok || (config.ok && !isConfigurationOrderable(config.groups));
 
   const quantity = hydrated ? getQuantity(item.id) : 0;
-  const isUnavailable = item.available === false;
+  const isUnavailable = item.available === false || optionsBroken;
   const hasDiscount = typeof item.oldPrice === "number" && item.oldPrice > item.price;
 
   return (
@@ -109,6 +125,32 @@ export default function MenuItemRow({
           <span className="absolute -bottom-1 right-0 rounded-full bg-gray-200 px-3 py-2 text-xs font-bold text-gray-500">
             Μη διαθέσιμο
           </span>
+        ) : hasOptions ? (
+          <button
+            type="button"
+            onClick={() => setCustomizing(true)}
+            aria-haspopup="dialog"
+            aria-label={
+              quantity > 0
+                ? `Προσθήκη ${item.name} με επιλογές (έχεις ${quantity} στο καλάθι)`
+                : `Επιλογές και προσθήκη ${item.name} στο καλάθι`
+            }
+            className="absolute -bottom-1 right-0 flex h-9 items-center gap-1 rounded-full bg-orange-500 px-3 text-sm font-bold text-white shadow-lg shadow-orange-500/30 transition-all duration-300 hover:scale-110 hover:bg-orange-600 active:scale-95"
+          >
+            {quantity > 0 ? (
+              <>
+                <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-white px-1 text-[11px] font-black text-orange-600">
+                  {quantity}
+                </span>
+                <Plus className="h-4 w-4" aria-hidden="true" />
+              </>
+            ) : (
+              <>
+                <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+                Επιλογές
+              </>
+            )}
+          </button>
         ) : quantity > 0 ? (
           <div className="absolute -bottom-1 right-0 flex items-center gap-1 rounded-full border border-orange-200 bg-white p-1 shadow-lg">
             <button
@@ -143,6 +185,25 @@ export default function MenuItemRow({
           </button>
         )}
       </div>
+
+      {customizing && (
+        <ProductOptionsDialog
+          item={item}
+          mode="add"
+          maxQuantity={CHECKOUT_LIMITS.maxQuantityPerLine - quantity}
+          onClose={() => setCustomizing(false)}
+          onConfirm={(line) => {
+            const result = addConfiguredLine(item, shop, line);
+            if (result.ok === false) {
+              return result.reason === "product_limit"
+                ? `Έως ${CHECKOUT_LIMITS.maxQuantityPerLine} τεμάχια ανά προϊόν, μαζί με όσα έχεις ήδη στο καλάθι.`
+                : `Το καλάθι έχει ήδη ${CHECKOUT_LIMITS.maxLines} διαφορετικά προϊόντα.`;
+            }
+            setCustomizing(false);
+            return null;
+          }}
+        />
+      )}
     </article>
   );
 }

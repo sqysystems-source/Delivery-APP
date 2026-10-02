@@ -15,6 +15,7 @@
  * ========================================================================== */
 
 import type { CheckoutRequest } from "@/types";
+import { canonicalizeSelections, cartLineKey } from "@/lib/menu/options";
 
 /** Νέο τυχαίο κλειδί (UUID v4 — 36 χαρακτήρες από [0-9a-f-]) */
 export function generateIdempotencyKey(): string {
@@ -49,11 +50,32 @@ export function stableStringify(value: unknown): string {
     .join(",")}}`;
 }
 
-/** Αποτύπωμα αιτήματος — οι γραμμές ταξινομούνται ώστε η σειρά να μη μετράει */
+/**
+ * Αποτύπωμα αιτήματος — οι γραμμές ταξινομούνται ώστε η σειρά να μη μετράει.
+ *
+ * Milestone 3: οι επιλογές κάθε γραμμής μπαίνουν σε ΚΑΝΟΝΙΚΗ μορφή (ομάδες
+ * και επιλογές ταξινομημένες κατά id), και οι γραμμές ταξινομούνται κατά
+ * κλειδί γραμμής. Ίδιες επιλογές σε άλλη σειρά → ίδιο αποτύπωμα (ίδιο
+ * κλειδί)· άλλες επιλογές → άλλο αποτύπωμα (νέο κλειδί). Γραμμές χωρίς
+ * επιλογές δίνουν ακριβώς το αποτύπωμα του milestone 1/2.
+ */
 export function requestFingerprint(request: Omit<CheckoutRequest, "idempotencyKey">): string {
-  const lines = [...request.lines].sort((a, b) =>
-    a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0,
-  );
+  const lines = request.lines
+    .map((line) => {
+      const canonical = canonicalizeSelections(line.selections);
+      // Κακόμορφες επιλογές δεν κανονικοποιούνται — μένουν ως έχουν (ο server θα τις απορρίψει)
+      const selections = canonical.ok ? canonical.selections : line.selections;
+      const key = cartLineKey(line.itemId, canonical.ok ? canonical.selections : []);
+      return {
+        key,
+        line:
+          selections && selections.length > 0
+            ? { itemId: line.itemId, quantity: line.quantity, selections }
+            : { itemId: line.itemId, quantity: line.quantity },
+      };
+    })
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    .map(({ line }) => line);
   return stableStringify({ ...request, lines });
 }
 

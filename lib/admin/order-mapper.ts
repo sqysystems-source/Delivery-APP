@@ -12,6 +12,7 @@
  * ========================================================================== */
 
 import type {
+  OrderLineOption,
   CheckoutCustomer,
   CheckoutDelivery,
   OrderCancelReason,
@@ -19,6 +20,8 @@ import type {
   PaymentMethod,
 } from "@/types";
 import { isPaymentMethod } from "@/lib/checkout/constants";
+import { centsToEuros } from "@/lib/checkout/money";
+import { readOptionSnapshotForDisplay } from "@/lib/menu/options";
 
 export type AdminOrderLine = {
   itemId: string;
@@ -26,6 +29,13 @@ export type AdminOrderLine = {
   unitPrice: number;
   quantity: number;
   lineTotal: number;
+  /**
+   * Milestone 3: τι διάλεξε ο πελάτης, ΟΠΩΣ αποθηκεύτηκε στην παραγγελία
+   * (όχι ο σημερινός κατάλογος). Κενό σε γραμμές χωρίς επιλογές.
+   */
+  options: OrderLineOption[];
+  /** Βασική τιμή χωρίς επιλογές — null όταν δεν καταγράφηκε */
+  basePrice: number | null;
 };
 
 export type AdminOrder = {
@@ -80,12 +90,22 @@ function toLines(value: unknown): AdminOrderLine[] {
     const unitPrice = toNumber(line.unitPrice);
     const quantity = toNumber(line.quantity);
 
+    const options = readOptionSnapshotForDisplay(line.options);
+    const basePrice =
+      typeof line.basePriceCents === "number" && Number.isSafeInteger(line.basePriceCents)
+        ? centsToEuros(line.basePriceCents)
+        : typeof line.basePrice === "number" && Number.isFinite(line.basePrice)
+          ? line.basePrice
+          : null;
+
     return {
       itemId: typeof line.itemId === "string" ? line.itemId : "",
       name: toText(line.name) || "Προϊόν",
       unitPrice,
       quantity,
       lineTotal: line.lineTotal !== undefined ? toNumber(line.lineTotal) : unitPrice * quantity,
+      options,
+      basePrice: options.length > 0 ? basePrice : null,
     };
   });
 }

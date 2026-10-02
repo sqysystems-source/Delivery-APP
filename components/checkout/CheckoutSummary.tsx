@@ -6,20 +6,28 @@
  *  Σύνοψη παραγγελίας στο checkout: κατάστημα, επεξεργάσιμες γραμμές,
  *  σύνολα, οδηγίες για ελάχιστη παραγγελία / δωρεάν μεταφορικά και —όταν ο
  *  server βρει άλλες τιμές— η ειδοποίηση αλλαγής που ζητά νέα επιβεβαίωση.
+ *
+ *  Milestone 3: οι γραμμές αναγνωρίζονται από το κλειδί γραμμής (itemId +
+ *  επιλογές), δείχνουν τις επιλογές τους και έχουν «Επεξεργασία». Η γραμμή
+ *  που απέρριψε ο server λόγω επιλογών επισημαίνεται.
  * ========================================================================== */
 
 import type { ReactNode, RefObject } from "react";
 import Link from "next/link";
-import { AlertTriangle, Info, Minus, Plus, Store, Trash2 } from "lucide-react";
-import type { CartState, CartTotals } from "@/types";
+import { AlertTriangle, Info, Minus, Pencil, Plus, Store, Trash2 } from "lucide-react";
+import LineOptionsSummary from "@/components/options/LineOptionsSummary";
+import type { CartLine, CartState, CartTotals } from "@/types";
+import { productQuantity } from "@/lib/checkout/cart";
 import { CHECKOUT_LIMITS } from "@/lib/checkout/constants";
+import { lineKeyOf } from "@/lib/menu/options";
 import { centsToEuros, toCents } from "@/lib/checkout/money";
 import { cn, formatDeliveryFee, formatPrice } from "@/lib/format";
 
 export type PriceChangeNotice = {
   previousTotalCents: number;
   newTotalCents: number;
-  changes: Array<{ itemId: string; name: string; before: number; after: number }>;
+  /** `key` = κλειδί γραμμής (itemId + επιλογές) */
+  changes: Array<{ key: string; name: string; before: number; after: number }>;
   delivery: { before: number; after: number } | null;
 };
 
@@ -28,9 +36,14 @@ type CheckoutSummaryProps = {
   totals: CartTotals;
   /** Κλειδωμένο όσο στέλνεται η παραγγελία */
   locked: boolean;
-  onIncrease: (itemId: string) => void;
-  onDecrease: (itemId: string) => void;
-  onRemove: (itemId: string) => void;
+  /* Milestone 3: όλα με κλειδί γραμμής (lineKeyOf) */
+  onIncrease: (lineKey: string) => void;
+  onDecrease: (lineKey: string) => void;
+  onRemove: (lineKey: string) => void;
+  /** «Επεξεργασία επιλογών» μιας γραμμής */
+  onEdit?: (line: CartLine) => void;
+  /** Γραμμή που απέρριψε ο server λόγω επιλογών — επισημαίνεται */
+  highlightKey?: string | null;
   linesError?: string;
   priceNotice: PriceChangeNotice | null;
   priceNoticeRef: RefObject<HTMLDivElement | null>;
@@ -44,6 +57,8 @@ export default function CheckoutSummary({
   onIncrease,
   onDecrease,
   onRemove,
+  onEdit,
+  highlightKey = null,
   linesError,
   priceNotice,
   priceNoticeRef,
@@ -91,56 +106,97 @@ export default function CheckoutSummary({
 
       {/* ------------------------------- Γραμμές ----------------------------- */}
       <ul className="divide-y divide-gray-100 px-5" aria-label="Προϊόντα παραγγελίας">
-        {cart.lines.map((line) => (
-          <li key={line.itemId} className="flex items-start gap-3 py-3.5">
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-bold text-gray-900">{line.name}</p>
-              <p className="mt-0.5 text-xs text-gray-500">{formatPrice(line.unitPrice)} / τεμ.</p>
+        {cart.lines.map((line) => {
+          const key = lineKeyOf(line);
+          const highlighted = highlightKey === key;
+          const atProductLimit =
+            productQuantity(cart.lines, line.itemId) >= CHECKOUT_LIMITS.maxQuantityPerLine;
+          const canEdit = Boolean(onEdit) && (Boolean(line.options?.length) || highlighted);
 
-              <div className="mt-2 flex w-fit items-center gap-1 rounded-full border border-gray-200 bg-white p-1">
-                <button
-                  type="button"
-                  onClick={() => onDecrease(line.itemId)}
-                  disabled={locked}
-                  aria-label={`Μείωση ποσότητας για ${line.name}`}
-                  className="flex h-8 w-8 items-center justify-center rounded-full text-gray-600 transition-colors hover:bg-gray-100 hover:text-orange-600 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <Minus className="h-3.5 w-3.5" />
-                </button>
-                <span
-                  className="min-w-6 text-center text-sm font-black text-gray-900"
-                  aria-label={`Ποσότητα: ${line.quantity}`}
-                >
-                  {line.quantity}
+          return (
+            <li
+              key={key}
+              className={cn(
+                "flex items-start gap-3 py-3.5",
+                highlighted && "-mx-2 rounded-2xl bg-red-50 px-2 ring-1 ring-red-200",
+              )}
+            >
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-bold text-gray-900">{line.name}</p>
+                <LineOptionsSummary options={line.options} />
+                <p className="mt-0.5 text-xs text-gray-500">{formatPrice(line.unitPrice)} / τεμ.</p>
+                {highlighted && (
+                  <p className="mt-1 text-xs font-semibold text-red-700">
+                    Χρειάζεται επεξεργασία επιλογών πριν την αποστολή.
+                  </p>
+                )}
+
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <div className="flex w-fit items-center gap-1 rounded-full border border-gray-200 bg-white p-1">
+                    <button
+                      type="button"
+                      onClick={() => onDecrease(key)}
+                      disabled={locked}
+                      aria-label={`Μείωση ποσότητας για ${line.name}`}
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-gray-600 transition-colors hover:bg-gray-100 hover:text-orange-600 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <Minus className="h-3.5 w-3.5" />
+                    </button>
+                    <span
+                      className="min-w-6 text-center text-sm font-black text-gray-900"
+                      aria-label={`Ποσότητα: ${line.quantity}`}
+                    >
+                      {line.quantity}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onIncrease(key)}
+                      disabled={locked || atProductLimit}
+                      aria-label={`Αύξηση ποσότητας για ${line.name}`}
+                      className="flex h-8 w-8 items-center justify-center rounded-full bg-orange-500 text-white transition-colors hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-gray-300"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  {canEdit && (
+                    <button
+                      type="button"
+                      onClick={() => onEdit?.(line)}
+                      disabled={locked}
+                      aria-haspopup="dialog"
+                      aria-label={`Επεξεργασία επιλογών για ${line.name}`}
+                      className={cn(
+                        "flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-bold transition-colors disabled:opacity-40",
+                        highlighted
+                          ? "bg-red-600 text-white hover:bg-red-700"
+                          : "text-orange-600 hover:bg-orange-50",
+                      )}
+                    >
+                      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                      Επεξεργασία
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex shrink-0 flex-col items-end gap-2">
+                <span className="text-sm font-black text-gray-900">
+                  {formatPrice(centsToEuros(toCents(line.unitPrice) * line.quantity))}
                 </span>
                 <button
                   type="button"
-                  onClick={() => onIncrease(line.itemId)}
-                  disabled={locked || line.quantity >= CHECKOUT_LIMITS.maxQuantityPerLine}
-                  aria-label={`Αύξηση ποσότητας για ${line.name}`}
-                  className="flex h-8 w-8 items-center justify-center rounded-full bg-orange-500 text-white transition-colors hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-gray-300"
+                  onClick={() => onRemove(key)}
+                  disabled={locked}
+                  aria-label={`Αφαίρεση ${line.name} από την παραγγελία`}
+                  className="flex h-8 w-8 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-red-50 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  <Plus className="h-3.5 w-3.5" />
+                  <Trash2 className="h-4 w-4" />
                 </button>
               </div>
-            </div>
-
-            <div className="flex shrink-0 flex-col items-end gap-2">
-              <span className="text-sm font-black text-gray-900">
-                {formatPrice(centsToEuros(toCents(line.unitPrice) * line.quantity))}
-              </span>
-              <button
-                type="button"
-                onClick={() => onRemove(line.itemId)}
-                disabled={locked}
-                aria-label={`Αφαίρεση ${line.name} από την παραγγελία`}
-                className="flex h-8 w-8 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-red-50 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-            </div>
-          </li>
-        ))}
+            </li>
+          );
+        })}
       </ul>
 
       {linesError && (
@@ -175,7 +231,7 @@ export default function CheckoutSummary({
             {(priceNotice.changes.length > 0 || priceNotice.delivery) && (
               <ul className="mt-2 space-y-0.5 text-xs">
                 {priceNotice.changes.map((change) => (
-                  <li key={change.itemId}>
+                  <li key={change.key}>
                     {change.name}: {formatPrice(change.before)} → {formatPrice(change.after)}
                   </li>
                 ))}

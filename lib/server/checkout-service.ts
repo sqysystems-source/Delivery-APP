@@ -51,6 +51,12 @@ import {
 } from "@/lib/checkout/money";
 import { stableStringify } from "@/lib/checkout/idempotency";
 import {
+  cartLineKey,
+  describeSelectionProblem,
+  resolveSelections,
+  validateOptionGroups,
+} from "@/lib/menu/options";
+import {
   buildCompatAddress,
   cleanSingleLine,
   isValidIdempotencyKey,
@@ -174,6 +180,10 @@ const MESSAGES: Record<Exclude<CheckoutErrorCode, "network_error" | "invalid_res
   item_not_found:
     "Κάποιο προϊόν του καλαθιού δεν υπάρχει πια στον κατάλογο. Αφαίρεσέ το και δοκίμασε ξανά.",
   item_unavailable: "Κάποιο προϊόν του καλαθιού εξαντλήθηκε.",
+  option_unavailable:
+    "Κάποια επιλογή προϊόντος δεν είναι πια διαθέσιμη. Επεξεργάσου το προϊόν στο καλάθι.",
+  options_changed:
+    "Οι επιλογές κάποιου προϊόντος άλλαξαν στον κατάλογο. Επεξεργάσου το προϊόν στο καλάθι.",
   below_minimum_order: "Δεν καλύπτεται η ελάχιστη παραγγελία του καταστήματος.",
   order_too_large:
     "Η παραγγελία ξεπερνά το όριο των 500€. Επικοινώνησε με το κατάστημα για μεγάλες παραγγελίες.",
@@ -234,7 +244,14 @@ export function idempotencyRecordId(uid: string, key: string): string {
   return sha256(`${uid}\u0000${key}`);
 }
 
-/** Κανονική μορφή του αιτήματος ΧΩΡΙΣ το κλειδί — ίδια δεδομένα, ίδιο hash */
+/**
+ * Κανονική μορφή του αιτήματος ΧΩΡΙΣ το κλειδί — ίδια δεδομένα, ίδιο hash.
+ * Milestone 3: οι γραμμές είναι ήδη κανονικές (validateAndMergeLines), άρα
+ * περιλαμβάνουν τις κανονικές επιλογές: ίδιες επιλογές σε άλλη σειρά → ίδιο
+ * hash· άλλες επιλογές → άλλο hash (idempotency_key_reused). Γραμμές χωρίς
+ * επιλογές δεν έχουν πεδίο `selections`, οπότε τα hash του milestone 1/2
+ * μένουν ίδια.
+ */
 export function canonicalRequestHash(request: ValidatedCheckoutRequest): string {
   return sha256(
     stableStringify({
@@ -280,7 +297,7 @@ function parseEtaMinutes(value: unknown): [number, number] | null {
 export function priceOrder(
   request: ValidatedCheckoutRequest,
   shop: Record<string, unknown>,
-  items: Array<Record<string, unknown> | null>,
+  items: ReadonlyMap<string, Record<string, unknown> | null>,
   logger?: CheckoutLogger,
 ): PricingOk | PricingFailure {
   /* Κλειστό κατάστημα */
@@ -307,13 +324,14 @@ export function priceOrder(
   const shopName =
     rawShopName && rawShopName.length <= CHECKOUT_LIMITS.shopNameMax ? rawShopName : request.shopId;
 
-  /* Γραμμές — η τιμή έρχεται ΑΠΟΚΛΕΙΣΤΙΚΑ από το menuItems */
+  /* Γραμμές — η τιμή έρχεται ΑΠΟΚΛΕΙΣΤΙΚΑ από το menuItems.
+   * Milestone 3: πολλές γραμμές (παραλλαγές) μπορεί να δείχνουν στο ΙΔΙΟ
+   * προϊόν· το `items` είναι ευρετήριο itemId → έγγραφο (ή null). */
   const lines: VerifiedOrderLine[] = [];
   let subtotalCents = 0;
 
-  for (let index = 0; index < request.lines.length; index += 1) {
-    const line = request.lines[index];
-    const item = items[index];
+  for (const line of request.lines) {
+    const item = items.get(line.itemId) ?? null;
 
     if (!item) {
       return {
@@ -336,8 +354,8 @@ export function priceOrder(
       };
     }
 
-    const unitPriceCents = parseItemPriceCents(item.price);
-    if (unitPriceCents === null) {
+    const basePriceCents = parseItemPriceCents(item.price);
+    if (basePriceCents === null) {
       logger?.error(
         `[orders] Κακόμορφη τιμή στο προϊόν shops/${request.shopId}/menuItems/${line.itemId}:`,
         item.price,
@@ -345,7 +363,40 @@ export function priceOrder(
       return { ok: false, result: failure(500, "menu_config_invalid") };
     }
 
+    /* Ρύθμιση επιλογών ΟΠΩΣ ΕΙΝΑΙ ΤΩΡΑ στον κατάλογο — κακόμορφη = ελεγχόμενο
+     * σφάλμα, ποτέ σιωπηλή αγνόηση (θα χρέωνε άλλο προϊόν από αυτό που είδε). */
+    const config = validateOptionGroups(item.optionGroups, "read");
+    if (!config.ok) {
+      logger?.error(
+        `[orders] Κακόμορφες επιλογές στο προϊόν shops/${request.shopId}/menuItems/${line.itemId}:`,
+        config.errors,
+      );
+      return { ok: false, result: failure(500, "menu_config_invalid") };
+    }
+
+    const selections = line.selections ?? [];
+    const resolved = resolveSelections(config.groups, selections);
+    if (!resolved.ok) {
+      const lineKey = cartLineKey(line.itemId, selections);
+      return {
+        ok: false,
+        result: failure(
+          409,
+          resolved.problem.reason === "unavailable" ? "option_unavailable" : "options_changed",
+          {
+            itemId: line.itemId,
+            lineKey,
+            message: describeSelectionProblem(resolved.problem, name),
+          },
+        ),
+      };
+    }
+
+    const unitPriceCents = basePriceCents + resolved.extraCents;
     const lineTotalCents = unitPriceCents * line.quantity;
+    if (!isSafeCents(unitPriceCents) || !isSafeCents(lineTotalCents)) {
+      return { ok: false, result: failure(500, "menu_config_invalid") };
+    }
     subtotalCents += lineTotalCents;
 
     lines.push({
@@ -356,6 +407,15 @@ export function priceOrder(
       lineTotal: centsToEuros(lineTotalCents),
       unitPriceCents,
       lineTotalCents,
+      /* Στιγμιότυπο επιλογών ΜΟΝΟ όταν υπάρχουν — οι απλές γραμμές κρατούν
+       * ακριβώς το σχήμα του milestone 1/2. */
+      ...(resolved.options.length > 0
+        ? {
+            basePrice: centsToEuros(basePriceCents),
+            basePriceCents,
+            options: resolved.options,
+          }
+        : {}),
     });
   }
 
@@ -448,6 +508,9 @@ function buildOrderDocument(
     ...(request.notes ? { notes: request.notes } : {}),
     paymentMethod: request.paymentMethod,
 
+    /* Αμετάβλητο στιγμιότυπο: ονόματα, επιλογές, βάση, προσαυξήσεις, μονάδα,
+     * ποσότητα, σύνολο γραμμής — όπως τα επαλήθευσε ο server ΤΩΡΑ. Οι οθόνες
+     * και οι αποδείξεις διαβάζουν ΑΥΤΑ, ποτέ τον σημερινό κατάλογο. */
     lines: quote.lines.map((line) => ({
       itemId: line.itemId,
       name: line.name,
@@ -456,6 +519,13 @@ function buildOrderDocument(
       lineTotal: line.lineTotal,
       unitPriceCents: line.unitPriceCents,
       lineTotalCents: line.lineTotalCents,
+      ...(line.options && line.options.length > 0
+        ? {
+            basePrice: line.basePrice,
+            basePriceCents: line.basePriceCents,
+            options: line.options.map((option) => ({ ...option })),
+          }
+        : {}),
     })),
     subtotal: quote.subtotal,
     deliveryFee: quote.deliveryFee,
@@ -587,10 +657,10 @@ export async function handleCheckoutRequest(
         const shop = await tx.getShop(request.shopId);
         if (!shop) return { kind: "rejected", result: failure(404, "shop_not_found") };
 
-        const items = await tx.getMenuItems(
-          request.shopId,
-          request.lines.map((line) => line.itemId),
-        );
+        /* Κάθε προϊόν διαβάζεται ΜΙΑ φορά, όσες παραλλαγές κι αν έχει */
+        const itemIds = [...new Set(request.lines.map((line) => line.itemId))];
+        const itemDocs = await tx.getMenuItems(request.shopId, itemIds);
+        const items = new Map(itemIds.map((itemId, index) => [itemId, itemDocs[index] ?? null]));
 
         const pricing = priceOrder(request, shop, items, logger);
         if (!pricing.ok) return { kind: "rejected", result: pricing.result };

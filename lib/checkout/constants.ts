@@ -41,7 +41,9 @@ export const CHECKOUT_LIMITS = {
   documentIdMax: 128,
   shopNameMax: 200,
   itemNameMax: 120,
-  maxRequestBytes: 16_384,
+  /** Milestone 3: 16 KB → 64 KB, ώστε να χωρούν 40 γραμμές με επιλογές
+   *  (έως 30 ids η καθεμία — δες OPTION_LIMITS στο lib/menu/options.ts). */
+  maxRequestBytes: 65_536,
 
   /* Ταβάνια ρυθμίσεων καταστήματος/καταλόγου (σε ευρώ) */
   maxItemPrice: 999,

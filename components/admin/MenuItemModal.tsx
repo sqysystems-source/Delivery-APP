@@ -10,12 +10,25 @@
  *  Ο Έλληνας καταστηματάρχης θα γράψει «3,90». Το parseFloat("3,90") δίνει
  *  3 — δηλαδή θα πουλούσε το σουβλάκι 3€ αντί για 3,90€, χωρίς κανένα
  *  μήνυμα λάθους. Γι' αυτό το κόμμα μετατρέπεται σε τελεία πριν το parse.
+ *
+ *  ── ΕΠΙΛΟΓΕΣ (milestone 3) ──────────────────────────────────────────────
+ *  Ενότητα «Επιλογές προϊόντος» (OptionGroupsEditor): μέγεθος, έξτρα,
+ *  αφαιρέσεις, με προεπισκόπηση. Ο έλεγχος εδώ είναι ο ΙΔΙΟΣ με του server
+ *  (validateOptionGroups σε λειτουργία "write")· ό,τι απορρίψει ο server
+ *  εμφανίζεται στο αντίστοιχο πεδίο.
  * ========================================================================== */
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { AlertTriangle, Flame, Loader2, Package, X } from "lucide-react";
 import type { MenuCategory, MenuItem } from "@/types";
 import type { MenuItemInput } from "@/hooks/useMenuManager";
+import OptionGroupsEditor, {
+  draftsFromStored,
+  groupsFromDrafts,
+  type GroupDraft,
+} from "@/components/admin/OptionGroupsEditor";
+import { validateOptionGroups, type OptionConfigError } from "@/lib/menu/options";
+import { MenuItemSaveError } from "@/lib/menu/save-menu-item";
 import { cn, formatPrice } from "@/lib/format";
 
 type MenuItemModalProps = {
@@ -68,6 +81,25 @@ export default function MenuItemModal({
 
   const [errors, setErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
+  /* Milestone 3: ομάδες επιλογών ως πρόχειρο φόρμας */
+  const [optionDrafts, setOptionDrafts] = useState<GroupDraft[]>([]);
+  /** Μετά την πρώτη απόπειρα αποθήκευσης, τα λάθη επιλογών φαίνονται ζωντανά */
+  const [showOptionErrors, setShowOptionErrors] = useState(false);
+  const [serverOptionErrors, setServerOptionErrors] = useState<OptionConfigError[]>([]);
+
+  const optionCheck = useMemo(
+    () => validateOptionGroups(groupsFromDrafts(optionDrafts), "write"),
+    [optionDrafts],
+  );
+  const previewCheck = useMemo(
+    () => validateOptionGroups(groupsFromDrafts(optionDrafts), "read"),
+    [optionDrafts],
+  );
+  const visibleOptionErrors: OptionConfigError[] = serverOptionErrors.length
+    ? serverOptionErrors
+    : showOptionErrors && !optionCheck.ok
+      ? optionCheck.errors
+      : [];
 
   /* Γέμισμα της φόρμας κάθε φορά που ανοίγει */
   useEffect(() => {
@@ -81,6 +113,9 @@ export default function MenuItemModal({
     setImage(item?.image ?? "");
     setPopular(item?.popular === true);
     setAvailable(item?.available !== false);
+    setOptionDrafts(draftsFromStored(item?.optionGroups));
+    setShowOptionErrors(false);
+    setServerOptionErrors([]);
     setErrors({});
     setFormError(null);
   }, [open, item, categories]);
@@ -147,6 +182,12 @@ export default function MenuItemModal({
     }
 
     setErrors(nextErrors);
+    setShowOptionErrors(true);
+    setServerOptionErrors([]);
+    if (!optionCheck.ok) {
+      setFormError("Έλεγξε τις επιλογές του προϊόντος — τα λάθη είναι σημειωμένα παρακάτω.");
+      return;
+    }
     if (Object.keys(nextErrors).length > 0) return;
 
     try {
@@ -164,11 +205,25 @@ export default function MenuItemModal({
           image: image.trim() || null,
           popular,
           available,
+          optionGroups: optionCheck.groups,
         },
         item?.id,
       );
       onClose();
     } catch (caught) {
+      /* Ο server είναι η τελική αρχή: δείχνουμε τα λάθη του στα πεδία τους */
+      if (caught instanceof MenuItemSaveError) {
+        const fields = caught.fieldErrors ?? {};
+        setErrors({
+          ...(fields.name ? { name: fields.name } : {}),
+          ...(fields.categoryId ? { categoryId: fields.categoryId } : {}),
+          ...(fields.price ? { price: fields.price } : {}),
+          ...(fields.oldPrice ? { oldPrice: fields.oldPrice } : {}),
+          ...(fields.description ? { description: fields.description } : {}),
+          ...(fields.image ? { image: fields.image } : {}),
+        });
+        setServerOptionErrors(caught.optionErrors ?? []);
+      }
       setFormError(
         caught instanceof Error ? caught.message : "Η αποθήκευση απέτυχε.",
       );
@@ -203,7 +258,7 @@ export default function MenuItemModal({
         onClick={() => !saving && onClose()}
       />
 
-      <div className="relative flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl sm:max-w-lg sm:rounded-3xl">
+      <div className="relative flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl sm:max-w-2xl sm:rounded-3xl">
         {/* ------------------------------ Header ------------------------- */}
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-gray-100 px-6 py-5">
           <div className="flex items-center gap-3">
@@ -403,6 +458,18 @@ export default function MenuItemModal({
                 </p>
               )}
             </div>
+
+            {/* Επιλογές προϊόντος (milestone 3) */}
+            <OptionGroupsEditor
+              drafts={optionDrafts}
+              onChange={(next) => {
+                setOptionDrafts(next);
+                setServerOptionErrors([]);
+              }}
+              errors={visibleOptionErrors}
+              previewGroups={previewCheck.ok ? previewCheck.groups : null}
+              disabled={saving}
+            />
 
             {/* Διακόπτες */}
             <div className="space-y-2">
