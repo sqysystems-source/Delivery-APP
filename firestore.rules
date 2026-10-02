@@ -1,0 +1,301 @@
+rules_version = '2';
+
+/* ==========================================================================
+ *  Buka Delivery — firestore.rules
+ *
+ *  ΕΚΔΟΣΗ ΜΕ ΔΙΑΧΕΙΡΙΣΗ ΚΑΤΑΛΟΓΟΥ ΑΠΟ ΤΟΝ ΚΑΤΑΣΤΗΜΑΤΑΡΧΗ.
+ *
+ *  Πέντε αρχές:
+ *   1. Ο κατάλογος είναι δημόσιος για ανάγνωση.
+ *   2. Ο καταστηματάρχης γράφει ΜΟΝΟ μέσα στο δικό του κατάστημα — και το
+ *      «δικό του» ορίζεται από το shops/{shopId}.ownerUid, όχι από κάτι που
+ *      στέλνει ο browser.
+ *   3. Οι παραγγελίες δημιουργούνται ΜΟΝΟ από τον server (/api/orders).
+ *   4. Μετά την καταχώρηση, κανένα οικονομικό πεδίο παραγγελίας δεν αλλάζει·
+ *      η κατάσταση αλλάζει μόνο από το κατάστημα, μόνο προς τα εμπρός.
+ *   5. Κάθε χρήστης βλέπει και αλλάζει ΜΟΝΟ το δικό του users/{uid}.
+ *
+ *  Ανέβασμα χωρίς terminal:
+ *    Firebase Console → Firestore Database → Rules → επικόλληση → Publish
+ * ========================================================================== */
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ==================== Βοηθητικές συναρτήσεις ==================== */
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
+    function shopData(shopId) {
+      return get(/databases/$(database)/documents/shops/$(shopId)).data;
+    }
+
+    /* ΠΡΟΣΟΧΗ ΣΤΟ ΚΟΣΤΟΣ: κάθε κλήση εδώ είναι ένα get(), δηλαδή ένα
+     * χρεώσιμο read. Σε ερώτημα λίστας ο κανόνας αποτιμάται ΑΝΑ document. */
+    function isShopOwner(shopId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/shops/$(shopId))
+        && shopData(shopId).ownerUid == request.auth.uid;
+    }
+
+    /* ============================ ΚΑΤΑΣΤΗΜΑΤΑ ======================= */
+
+    match /shops/{shopId} {
+      // Δημόσια ανάγνωση: η αρχική φορτώνει χωρίς login, και το admin panel
+      // βρίσκει το μαγαζί του χρήστη με where("ownerUid","==",uid).
+      allow read: if true;
+
+      allow create, delete: if isAdmin();
+
+      /* Ο ιδιοκτήτης αλλάζει όνομα, διεύθυνση, εικόνα, χρόνο παράδοσης και
+       * το `active` (ανοιχτά/κλειστά). ΔΕΝ αγγίζει:
+       *  • ownerUid  → θα έδινε το μαγαζί σε άλλον
+       *  • rating / reviews / tag → εμπορική προβολή, ανήκει στο Buka
+       *  • minOrder / deliveryFee / freeDeliveryOver → τα διαβάζει το
+       *    /api/orders τη στιγμή του υπολογισμού· αλλαγή στη μέση μιας
+       *    παραγγελίας θα άλλαζε το ποσό που χρεώνεται ο πελάτης. */
+      allow update: if isAdmin()
+        || (isShopOwner(shopId)
+            && !request.resource.data.diff(resource.data)
+                 .affectedKeys()
+                 .hasAny([
+                   'ownerUid', 'rating', 'reviews', 'tag',
+                   'minOrder', 'deliveryFee', 'freeDeliveryOver'
+                 ]));
+
+      /* --------------------- Κατηγορίες μενού --------------------- */
+      match /menuCategories/{categoryId} {
+        function isValidCategory(data) {
+          return data.keys().hasAll(['label', 'emoji', 'sortOrder'])
+            && data.keys().hasOnly(['label', 'emoji', 'sortOrder', 'createdAt', 'updatedAt'])
+            && data.label is string
+            && data.label.size() >= 1
+            && data.label.size() <= 40
+            && data.emoji is string
+            && data.emoji.size() <= 8
+            && data.sortOrder is number;
+        }
+
+        allow read: if true;
+        allow create, update: if (isAdmin() || isShopOwner(shopId))
+          && isValidCategory(request.resource.data);
+        allow delete: if isAdmin() || isShopOwner(shopId);
+      }
+
+      /* ---------------------- Προϊόντα μενού ----------------------
+       *
+       * ΓΙΑΤΙ ΟΙ ΕΛΕΓΧΟΙ ΕΔΩ ΕΙΝΑΙ ΚΡΙΣΙΜΟΙ:
+       * Το /api/orders διαβάζει ΑΥΤΕΣ τις τιμές για να υπολογίσει τι
+       * χρεώνεται ο πελάτης. Αν κάποιος κατάφερνε να γράψει price ως
+       * string ή ως αρνητικό αριθμό, θα έσπαγε ή θα εκμεταλλευόταν τον
+       * υπολογισμό. Ο τύπος και το εύρος ελέγχονται εδώ, στη ρίζα.
+       *
+       * Η διαδρομή shops/{shopId}/menuItems εγγυάται ήδη ότι το προϊόν
+       * ανήκει σε αυτό το κατάστημα. Επιπλέον απαιτούμε το πεδίο shopId
+       * μέσα στο document να ΣΥΜΦΩΝΕΙ με τη διαδρομή, ώστε να μη μείνει
+       * ποτέ ασυνέπεια που θα μπέρδευε queries και αναφορές.
+       */
+      match /menuItems/{itemId} {
+        function isValidMenuItem(data) {
+          return data.keys().hasAll(['shopId', 'categoryId', 'name', 'price'])
+            && data.keys().hasOnly([
+                 'shopId', 'categoryId', 'name', 'description', 'price',
+                 'oldPrice', 'image', 'popular', 'available',
+                 'sortOrder', 'createdAt', 'updatedAt'
+               ])
+            // Το προϊόν δηλώνει το κατάστημα στο οποίο βρίσκεται
+            && data.shopId == shopId
+            && data.categoryId is string
+            && data.categoryId.size() >= 1
+            && data.categoryId.size() <= 80
+            && data.name is string
+            && data.name.size() >= 2
+            && data.name.size() <= 80
+            && (!('description' in data)
+                || (data.description is string && data.description.size() <= 300))
+            // Η τιμή: αριθμός, ποτέ αρνητική, με λογικό ανώτατο όριο
+            && data.price is number
+            && data.price >= 0
+            && data.price <= 999
+            && (!('oldPrice' in data)
+                || (data.oldPrice is number
+                    && data.oldPrice > data.price
+                    && data.oldPrice <= 999))
+            && (!('image' in data)
+                || (data.image is string && data.image.size() <= 500))
+            && (!('popular' in data) || data.popular is bool)
+            && (!('available' in data) || data.available is bool)
+            && (!('sortOrder' in data) || data.sortOrder is number);
+        }
+
+        allow read: if true;
+
+        allow create: if (isAdmin() || isShopOwner(shopId))
+          && isValidMenuItem(request.resource.data);
+
+        // Στο update το shopId μένει κλειδωμένο: ένα προϊόν δεν «μετακομίζει»
+        allow update: if (isAdmin() || isShopOwner(shopId))
+          && isValidMenuItem(request.resource.data)
+          && request.resource.data.shopId == resource.data.shopId;
+
+        allow delete: if isAdmin() || isShopOwner(shopId);
+      }
+    }
+
+    /* ============================ ΠΑΡΑΓΓΕΛΙΕΣ ======================= */
+
+    /* Milestone 2 — αλλαγές σε αυτό το block (όλα τα άλλα είναι αμετάβλητα):
+     *  • Ο καταστηματάρχης ελέγχεται ΜΟΝΟ μέσω του ΤΡΕΧΟΝΤΟΣ
+     *    shops/{shopId}.ownerUid. Το αντίγραφο `ownerUid` μέσα στην
+     *    παραγγελία δεν δίνει πια πρόσβαση: ένας πρώην ιδιοκτήτης (μετά από
+     *    μεταβίβαση καταστήματος) δεν διαβάζει/αλλάζει παραγγελίες πελατών.
+     *  • Ο καταστηματάρχης κάνει ΜΟΝΟ τις μεταβάσεις του ταμπλό:
+     *      pending → accepted → preparing → delivering → completed
+     *      και cancelled από οποιαδήποτε ΜΗ τελική κατάσταση.
+     *    Οι completed/cancelled δεν αλλάζουν ξανά (εκτός από admin).
+     *  • updatedAt == request.time (serverTimestamp), όχι αυθαίρετη τιμή.
+     *  • cancelReason: προαιρετικό (συμβατό με το παλιό ταμπλό), μόνο μαζί με
+     *    cancelled, και να συμφωνεί με την προηγούμενη κατάσταση.
+     *  • etaMinutes δεν αλλάζει πια από τον client (κανένας κώδικας δεν το
+     *    γράφει, και ο πελάτης δεν βλέπει εκτιμήσεις χρόνου).
+     *  • Ο πελάτης (εγγεγραμμένος ή ανώνυμος) διαβάζει ΜΟΝΟ παραγγελίες με
+     *    userId == request.auth.uid· σε λίστα ΜΟΝΟ με limit ≤ 50.
+     *  • Ο πελάτης ΔΕΝ γράφει ποτέ: create/delete είναι false και το update
+     *    απαιτεί admin ή ιδιοκτήτη καταστήματος. */
+    match /orders/{orderId} {
+
+      function isOrderCustomer() {
+        return isSignedIn() && resource.data.userId == request.auth.uid;
+      }
+
+      /* Ο ΤΡΕΧΩΝ ιδιοκτήτης του καταστήματος της παραγγελίας (ένα get()) */
+      function isOrderShopOwner() {
+        return isShopOwner(resource.data.shopId);
+      }
+
+      function isValidStatusTransition(fromStatus, toStatus) {
+        return (fromStatus == 'pending'    && toStatus in ['accepted', 'cancelled'])
+          || (fromStatus == 'accepted'   && toStatus in ['preparing', 'cancelled'])
+          || (fromStatus == 'preparing'  && toStatus in ['delivering', 'cancelled'])
+          || (fromStatus == 'delivering' && toStatus in ['completed', 'cancelled']);
+      }
+
+      /* Απόρριψη = ακύρωση ΠΡΙΝ την αποδοχή· αλλιώς ακύρωση από το κατάστημα */
+      function isValidCancelReason(fromStatus, data) {
+        return !('cancelReason' in data)
+          || (data.status == 'cancelled'
+              && ((data.cancelReason == 'rejected_by_shop' && fromStatus == 'pending')
+                  || (data.cancelReason == 'cancelled_by_shop'
+                      && fromStatus in ['accepted', 'preparing', 'delivering'])));
+      }
+
+      /* ΔΗΜΙΟΥΡΓΙΑ: ΠΟΤΕ από τον client.
+       * Μόνη διαδρομή: POST /api/orders → Admin SDK, που διαβάζει τις τιμές
+       * από το menuItems. Μην το ξαναγυρίσεις σε `true` για διευκόλυνση:
+       * είναι ακριβώς η τρύπα που επιτρέπει παραγγελία 40€ με χρέωση 0,01€. */
+      allow create: if false;
+
+      /* Μία παραγγελία: σελίδα παρακολούθησης (πελάτης), ταμπλό (κατάστημα) */
+      allow get: if isAdmin() || isOrderCustomer() || isOrderShopOwner();
+
+      /* Λίστες: «Οι παραγγελίες μου» (where userId == uid, limit ≤ 50) και
+       * ταμπλό (where shopId == …). Ένα query χωρίς τέτοιο φίλτρο απορρίπτεται. */
+      allow list: if isAdmin()
+        || (isOrderCustomer() && request.query.limit <= 50)
+        || isOrderShopOwner();
+
+      /* Ο καταστηματάρχης αλλάζει ΜΟΝΟ την πορεία της παραγγελίας.
+       * total, lines, subtotal, deliveryFee, userId, shopId, customer,
+       * delivery μένουν αμετάβλητα για πάντα. */
+      allow update: if isAdmin()
+        || (isOrderShopOwner()
+            && request.resource.data.diff(resource.data)
+                 .affectedKeys()
+                 .hasOnly(['status', 'updatedAt', 'cancelReason'])
+            && request.resource.data.diff(resource.data)
+                 .affectedKeys()
+                 .hasAll(['status', 'updatedAt'])
+            && isValidStatusTransition(resource.data.status, request.resource.data.status)
+            && request.resource.data.updatedAt == request.time
+            && isValidCancelReason(resource.data.status, request.resource.data));
+
+      // Οι παραγγελίες δεν σβήνονται ποτέ — είναι λογιστικό αρχείο
+      allow delete: if false;
+    }
+
+    /* =================== CHECKOUT — ΜΟΝΟ ΓΙΑ ΤΟΝ SERVER ================= */
+
+    // Αποτελέσματα idempotency και «κλειστές» προσπάθειες (milestone 2).
+    // Τα γράφει/διαβάζει ΜΟΝΟ το Admin SDK (/api/orders, /api/orders/recover).
+    // Ρητό deny για τεκμηρίωση — το ίδιο ισχύει ήδη από την προεπιλογή.
+    match /checkoutRequests/{requestId} {
+      allow read, write: if false;
+    }
+
+    /* ======================== ΠΡΟΦΙΛ ΧΡΗΣΤΩΝ ======================== */
+
+    match /users/{userId} {
+
+      function isOwner() {
+        return isSignedIn() && request.auth.uid == userId;
+      }
+
+      function isValidProfile(data) {
+        return data.keys().hasAll([
+                 'uid', 'fullName', 'email', 'phone', 'addresses', 'role', 'createdAt'
+               ])
+          && data.keys().hasOnly([
+                 'uid', 'fullName', 'email', 'phone', 'addresses', 'role',
+                 'createdAt', 'updatedAt'
+               ])
+          && data.uid == userId
+          && data.fullName is string
+          && data.fullName.size() >= 2
+          && data.fullName.size() <= 80
+          && data.email is string
+          && data.email.size() <= 200
+          && data.phone is string
+          && data.phone.size() <= 30
+          && data.addresses is list
+          && data.addresses.size() <= 10;
+      }
+
+      /* Το `role == 'customer'` εμποδίζει κάποιον να γραφτεί ως owner ή
+       * admin. Η αναβάθμιση γίνεται ΜΟΝΟ από το Firebase Console ή το
+       * Admin SDK — γι' αυτό και το update παρακάτω κλειδώνει το πεδίο. */
+      allow create: if isOwner()
+        && isValidProfile(request.resource.data)
+        && request.resource.data.role == 'customer'
+        && request.resource.data.createdAt == request.time;
+
+      allow read: if isOwner() || isAdmin();
+
+      allow update: if isOwner()
+        && isValidProfile(request.resource.data)
+        && !request.resource.data.diff(resource.data)
+             .affectedKeys()
+             .hasAny(['uid', 'createdAt', 'role', 'email'])
+        && request.resource.data.updatedAt == request.time;
+
+      allow delete: if false;
+
+      match /addresses/{addressId} {
+        allow read, write: if isOwner();
+      }
+    }
+
+    /* ======================== ΟΤΙΔΗΠΟΤΕ ΑΛΛΟ ======================== */
+
+    // Τεκμηρίωση της προεπιλογής, όχι επιπλέον προστασία: στο Firestore οι
+    // κανόνες ενώνονται με OR, οπότε αυτό ΔΕΝ ακυρώνει τα allow παραπάνω.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
