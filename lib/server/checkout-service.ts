@@ -23,6 +23,24 @@
  *  παραγγελία» είναι οριστική και ο πελάτης μπορεί να ξαναστείλει με
  *  νέο κλειδί χωρίς κίνδυνο διπλής παραγγελίας.
  *
+ *  ── ΩΡΑΡΙΟ ΚΑΙ ΖΩΝΕΣ ΠΑΡΑΔΟΣΗΣ (milestone 4) ────────────────────────────
+ *  Μέσα στη συναλλαγή, ΜΕΤΑ τον έλεγχο του κλειδιού (άρα οι επαναλήψεις και
+ *  η ανάκτηση επιστρέφουν την αρχική παραγγελία χωρίς να ξαναελέγξουν
+ *  ωράριο, ζώνη ή κατάλογο):
+ *    • διαθεσιμότητα με ώρα SERVER (deps.now(), ξανά σε κάθε προσπάθεια της
+ *      συναλλαγής) και τη ρύθμιση που διάβασε η συναλλαγή
+ *    • ΤΚ → τρέχουσα ΔΙΑΘΕΣΙΜΗ ζώνη → μεταφορικά/ελάχιστη/δωρεάν της ζώνης
+ *    • η ζώνη που είδε ο πελάτης πρέπει να είναι η ίδια (αλλιώς νέα επιβεβαίωση)
+ *
+ *  ΣΗΜΕΙΟ ΑΠΟΦΑΣΗΣ: η επιλεξιμότητα κρίνεται τη στιγμή `now` της
+ *  προσπάθειας που κάνει commit, πάνω στο έγγραφο καταστήματος που διάβασε
+ *  ΑΥΤΗ η προσπάθεια. Η συναλλαγή εγγυάται ότι η ρύθμιση δεν άλλαξε ανάμεσα
+ *  στην ανάγνωση και την εγγραφή (αλλιώς ξανατρέχει). ΔΕΝ εγγυάται ότι το
+ *  ρολόι δεν πέρασε την ώρα κλεισίματος στα λίγα ms μέχρι το commit — η
+ *  παραγγελία που κρίθηκε εμπρόθεσμη καταχωρείται, και η στιγμή της κρίσης
+ *  αποθηκεύεται ως `eligibilityCheckedAt`. Καμία παραγγελία δεν ακυρώνεται
+ *  αναδρομικά επειδή έκλεισε το κατάστημα.
+ *
  *  ── ΤΙ ΔΕΝ ΕΜΠΙΣΤΕΥΟΜΑΣΤΕ ΠΟΤΕ ΑΠΟ ΤΟΝ CLIENT ──────────────────────────
  *  Τιμές, ονόματα προϊόντων/καταστήματος, userId, ownerUid, κατάσταση, ώρα.
  *  Το `expectedTotalCents` είναι μόνο μέτρο σύγκρισης, ΠΟΤΕ τιμή.
@@ -32,6 +50,7 @@ import "server-only";
 
 import { createHash } from "node:crypto";
 import type {
+  CheckoutAvailabilityInfo,
   CheckoutErrorBody,
   CheckoutErrorCode,
   CheckoutFieldErrors,
@@ -39,6 +58,7 @@ import type {
   CheckoutRecoveryResponseBody,
   CheckoutResponseBody,
   CheckoutSuccess,
+  DeliveryTermsSnapshot,
   VerifiedOrderLine,
 } from "@/types";
 import { CHECKOUT_LIMITS } from "@/lib/checkout/constants";
@@ -47,8 +67,11 @@ import {
   computeTotalsCents,
   isSafeCents,
   parseItemPriceCents,
-  parseShopTerms,
+  type ShopTermsCents,
 } from "@/lib/checkout/money";
+import { describeOrderBlock, evaluateShopAvailability } from "@/lib/shop/availability";
+import { parseOpeningHours } from "@/lib/shop/opening-hours";
+import { describeDeliveryProblem, parseDeliveryZones, resolveDeliveryTerms } from "@/lib/shop/delivery-zones";
 import { stableStringify } from "@/lib/checkout/idempotency";
 import {
   cartLineKey,
@@ -177,6 +200,12 @@ const MESSAGES: Record<Exclude<CheckoutErrorCode, "network_error" | "invalid_res
   rate_limited: "Πολλές παραγγελίες σε σύντομο διάστημα. Περίμενε ένα λεπτό και δοκίμασε ξανά.",
   shop_not_found: "Το κατάστημα δεν βρέθηκε.",
   shop_closed: "Το κατάστημα είναι προσωρινά κλειστό και δεν δέχεται παραγγελίες.",
+  postal_code_required:
+    "Συμπλήρωσε τον ταχυδρομικό κώδικα — το κατάστημα εξυπηρετεί συγκεκριμένες περιοχές.",
+  delivery_zone_unsupported: "Το κατάστημα δεν εξυπηρετεί αυτόν τον ταχυδρομικό κώδικα.",
+  delivery_zone_unavailable: "Η περιοχή σου δεν εξυπηρετείται προσωρινά από το κατάστημα.",
+  delivery_zone_changed:
+    "Οι περιοχές παράδοσης του καταστήματος άλλαξαν. Έλεγξε τη σύνοψη και επιβεβαίωσε ξανά.",
   item_not_found:
     "Κάποιο προϊόν του καλαθιού δεν υπάρχει πια στον κατάλογο. Αφαίρεσέ το και δοκίμασε ξανά.",
   item_unavailable: "Κάποιο προϊόν του καλαθιού εξαντλήθηκε.",
@@ -252,6 +281,9 @@ export function idempotencyRecordId(uid: string, key: string): string {
  * επιλογές δεν έχουν πεδίο `selections`, οπότε τα hash του milestone 1/2
  * μένουν ίδια.
  */
+/* Milestone 4: ο ΤΚ περιλαμβάνεται στην ταυτότητα του αιτήματος (επηρεάζει
+ * ζώνη και ποσό): ίδιο αίτημα με «546 22» ή «54622» → ίδιο hash· άλλος ΤΚ →
+ * άλλο hash (idempotency_key_reused). */
 export function canonicalRequestHash(request: ValidatedCheckoutRequest): string {
   return sha256(
     stableStringify({
@@ -262,6 +294,10 @@ export function canonicalRequestHash(request: ValidatedCheckoutRequest): string 
       paymentMethod: request.paymentMethod,
       lines: request.lines,
       expectedTotalCents: request.expectedTotalCents,
+      /* Milestone 4: η ζώνη που είδε ο πελάτης. Απούσα → το πεδίο παραλείπεται
+       * εντελώς (stableStringify), άρα τα hash των παλιών αιτημάτων μένουν ίδια.
+       * Ο ΤΚ μετέχει ήδη μέσω του κανονικοποιημένου `delivery.postalCode`. */
+      expectedDeliveryZoneId: request.expectedDeliveryZoneId,
     }),
   );
 }
@@ -271,7 +307,7 @@ export function orderCodeFromId(orderId: string): string {
 }
 
 /* ==========================================================================
- *  ΤΙΜΟΛΟΓΗΣΗ — καθαρή συνάρτηση πάνω σε ό,τι διάβασε η συναλλαγή
+ *  ΤΥΠΟΙ ΤΙΜΟΛΟΓΗΣΗΣ
  * ========================================================================== */
 
 type PricingOk = {
@@ -279,6 +315,7 @@ type PricingOk = {
   quote: CheckoutQuote;
   ownerUid: string | null;
   etaMinutes: [number, number] | null;
+  delivery: DeliveryTermsSnapshot;
 };
 
 type PricingFailure = { ok: false; result: CheckoutHttpResult };
@@ -294,31 +331,122 @@ function parseEtaMinutes(value: unknown): [number, number] | null {
   return null;
 }
 
+/* ==========================================================================
+ *  ΕΠΙΛΕΞΙΜΟΤΗΤΑ (milestone 4) — διαθεσιμότητα + ζώνη, ΠΡΙΝ την τιμολόγηση
+ * ========================================================================== */
+
+export type OrderEligibility =
+  | { ok: true; terms: ShopTermsCents; delivery: DeliveryTermsSnapshot }
+  | PricingFailure;
+
+/**
+ * Μπορεί να δημιουργηθεί ΤΩΡΑ (`nowMs`, ώρα server) παραγγελία σε αυτό το
+ * κατάστημα, για αυτόν τον ΤΚ; Και με ποιους όρους παράδοσης;
+ */
+export function checkOrderEligibility(
+  request: ValidatedCheckoutRequest,
+  shop: Record<string, unknown>,
+  nowMs: number,
+  logger?: CheckoutLogger,
+): OrderEligibility {
+  /* 1. Διαθεσιμότητα: παύση → κακόμορφη ρύθμιση → ωράριο */
+  const availability = evaluateShopAvailability(shop, nowMs);
+  if (availability.state !== "open") {
+    const info: CheckoutAvailabilityInfo = {
+      state: availability.state,
+      nextOpenAt: availability.nextOpenAt !== null ? new Date(availability.nextOpenAt).toISOString() : null,
+    };
+    if (availability.state === "unavailable") {
+      const hours = parseOpeningHours(shop.openingHours);
+      logger?.error(
+        `[orders] Κακόμορφη ρύθμιση διαθεσιμότητας στο κατάστημα ${request.shopId}:`,
+        hours.kind === "invalid" ? hours.errors : { active: shop.active },
+      );
+      return {
+        ok: false,
+        result: failure(409, "shop_config_invalid", {
+          message: describeOrderBlock(availability, nowMs),
+          availability: info,
+        }),
+      };
+    }
+    return {
+      ok: false,
+      result: failure(409, "shop_closed", {
+        message: describeOrderBlock(availability, nowMs),
+        availability: info,
+      }),
+    };
+  }
+
+  /* 2. Όροι παράδοσης: γενικοί (χωρίς ζώνες) ή της ΔΙΑΘΕΣΙΜΗΣ ζώνης του ΤΚ */
+  const postalCode = request.delivery.postalCode ?? null;
+  const resolution = resolveDeliveryTerms(shop, postalCode);
+  if (resolution.ok) return { ok: true, terms: resolution.terms, delivery: resolution.snapshot };
+
+  const message = describeDeliveryProblem(resolution.reason, postalCode);
+  switch (resolution.reason) {
+    case "shop_terms_invalid":
+      // Ίδια συμπεριφορά με πριν το milestone 4: ελεγχόμενο 500, ποτέ λάθος χρέωση
+      logger?.error(
+        `[orders] Κακόμορφο πεδίο ${resolution.field} στο κατάστημα ${request.shopId}:`,
+        shop[resolution.field ?? ""],
+      );
+      return { ok: false, result: failure(500, "shop_config_invalid") };
+    case "zones_config_invalid": {
+      const parsed = parseDeliveryZones(shop.deliveryZones);
+      logger?.error(
+        `[orders] Κακόμορφες ζώνες παράδοσης στο κατάστημα ${request.shopId}:`,
+        parsed.kind === "invalid" ? parsed.errors : null,
+      );
+      return { ok: false, result: failure(409, "shop_config_invalid", { message }) };
+    }
+    case "postal_code_required":
+      return {
+        ok: false,
+        result: failure(400, "postal_code_required", { message, fieldErrors: { postalCode: message } }),
+      };
+    case "postal_code_invalid":
+      return {
+        ok: false,
+        result: failure(400, "validation_failed", { fieldErrors: { postalCode: message } }),
+      };
+    case "unsupported":
+      return {
+        ok: false,
+        result: failure(409, "delivery_zone_unsupported", { message, fieldErrors: { postalCode: message } }),
+      };
+    case "zone_unavailable":
+      return {
+        ok: false,
+        result: failure(409, "delivery_zone_unavailable", { message, fieldErrors: { postalCode: message } }),
+      };
+  }
+}
+
+function describeZoneChange(delivery: DeliveryTermsSnapshot): string {
+  const terms = `μεταφορικά ${delivery.deliveryFeeCents === 0 ? "δωρεάν" : euro(delivery.deliveryFeeCents)}, ελάχιστη παραγγελία ${euro(delivery.minOrderCents)}`;
+  return delivery.mode === "zone"
+    ? `Ο ΤΚ ${delivery.postalCode} εξυπηρετείται πλέον από τη ζώνη «${delivery.zoneName}» (${terms}). Δεν στάλθηκε καμία παραγγελία — έλεγξε τη σύνοψη και επιβεβαίωσε ξανά.`
+    : `Το κατάστημα δεν χρησιμοποιεί πια ζώνες ΤΚ· ισχύουν οι γενικοί όροι (${terms}). Δεν στάλθηκε καμία παραγγελία — έλεγξε τη σύνοψη και επιβεβαίωσε ξανά.`;
+}
+
+/* ==========================================================================
+ *  ΤΙΜΟΛΟΓΗΣΗ — καθαρή συνάρτηση πάνω σε ό,τι διάβασε η συναλλαγή
+ *
+ *  Milestone 4: οι όροι (μεταφορικά/ελάχιστη/δωρεάν) έρχονται από την
+ *  checkOrderEligibility — της ζώνης ή του καταστήματος. Το υποσύνολο είναι
+ *  τα προϊόντα ΜΑΖΙ με τις επιλογές τους (milestone 3).
+ * ========================================================================== */
+
 export function priceOrder(
   request: ValidatedCheckoutRequest,
   shop: Record<string, unknown>,
   items: ReadonlyMap<string, Record<string, unknown> | null>,
+  eligibility: { terms: ShopTermsCents; delivery: DeliveryTermsSnapshot },
   logger?: CheckoutLogger,
 ): PricingOk | PricingFailure {
-  /* Κλειστό κατάστημα */
-  if (shop.active === false) {
-    return { ok: false, result: failure(409, "shop_closed") };
-  }
-
-  /* Οικονομικοί όροι — κακόμορφες τιμές = ελεγχόμενο σφάλμα, όχι λάθος χρέωση */
-  const termsResult = parseShopTerms({
-    minOrder: shop.minOrder,
-    deliveryFee: shop.deliveryFee,
-    freeDeliveryOver: shop.freeDeliveryOver,
-  });
-  if (!termsResult.ok) {
-    logger?.error(
-      `[orders] Κακόμορφο πεδίο ${termsResult.field} στο κατάστημα ${request.shopId}:`,
-      termsResult.value,
-    );
-    return { ok: false, result: failure(500, "shop_config_invalid") };
-  }
-  const terms = termsResult.terms;
+  const { terms, delivery } = eligibility;
 
   const rawShopName = cleanSingleLine(shop.name);
   const shopName =
@@ -441,9 +569,21 @@ export function priceOrder(
       freeDeliveryOver:
         terms.freeDeliveryOverCents === null ? null : centsToEuros(terms.freeDeliveryOverCents),
     },
+    delivery,
   };
 
-  /* Ελάχιστη παραγγελία — με τις ΕΞΟΥΣΙΟΔΟΤΗΜΕΝΕΣ τιμές */
+  /* Milestone 4: η ζώνη που είδε ο πελάτης ≠ η τρέχουσα → νέα επιβεβαίωση.
+   * Ποτέ σιωπηλή μετάβαση σε άλλη ζώνη ή στους γενικούς όρους. */
+  const seenZoneId = request.expectedDeliveryZoneId ?? null;
+  const currentZoneId = delivery.mode === "zone" ? delivery.zoneId : null;
+  if (seenZoneId !== currentZoneId) {
+    return {
+      ok: false,
+      result: failure(409, "delivery_zone_changed", { message: describeZoneChange(delivery), quote }),
+    };
+  }
+
+  /* Ελάχιστη παραγγελία — με τις ΕΞΟΥΣΙΟΔΟΤΗΜΕΝΕΣ τιμές (της ζώνης, αν υπάρχει) */
   if (totals.missingForMinOrderCents > 0) {
     return {
       ok: false,
@@ -464,6 +604,7 @@ export function priceOrder(
     quote,
     ownerUid: typeof shop.ownerUid === "string" && shop.ownerUid.length > 0 ? shop.ownerUid : null,
     etaMinutes: parseEtaMinutes(shop.etaMinutes),
+    delivery,
   };
 }
 
@@ -492,6 +633,7 @@ function buildOrderDocument(
   request: ValidatedCheckoutRequest,
   pricing: PricingOk,
   serverTimestamp: unknown,
+  eligibilityCheckedAt: unknown,
 ): Record<string, unknown> {
   const { quote } = pricing;
 
@@ -533,6 +675,12 @@ function buildOrderDocument(
     subtotalCents: quote.subtotalCents,
     deliveryFeeCents: quote.deliveryFeeCents,
     totalCents: quote.totalCents,
+
+    /* Milestone 4: ΑΜΕΤΑΒΛΗΤΟ στιγμιότυπο όρων παράδοσης (ζώνη, ΤΚ, μεταφορικά,
+     * όρια). Οι οθόνες διαβάζουν ΑΥΤΟ, όχι τη σημερινή ρύθμιση ζωνών. */
+    deliveryTerms: { ...pricing.delivery },
+    /* Η στιγμή (ώρα server) στην οποία κρίθηκε ότι το κατάστημα δεχόταν παραγγελίες */
+    eligibilityCheckedAt,
 
     status: "pending",
     etaMinutes: pricing.etaMinutes,
@@ -657,12 +805,18 @@ export async function handleCheckoutRequest(
         const shop = await tx.getShop(request.shopId);
         if (!shop) return { kind: "rejected", result: failure(404, "shop_not_found") };
 
+        /* Milestone 4: ώρα SERVER, ξαναδιαβασμένη σε ΚΑΘΕ προσπάθεια της
+         * συναλλαγής (μια επανάληψη λόγω σύγκρουσης ελέγχει ξανά το «τώρα»). */
+        const decidedAt = deps.now();
+        const eligibility = checkOrderEligibility(request, shop, decidedAt, logger);
+        if (!eligibility.ok) return { kind: "rejected", result: eligibility.result };
+
         /* Κάθε προϊόν διαβάζεται ΜΙΑ φορά, όσες παραλλαγές κι αν έχει */
         const itemIds = [...new Set(request.lines.map((line) => line.itemId))];
         const itemDocs = await tx.getMenuItems(request.shopId, itemIds);
         const items = new Map(itemIds.map((itemId, index) => [itemId, itemDocs[index] ?? null]));
 
-        const pricing = priceOrder(request, shop, items, logger);
+        const pricing = priceOrder(request, shop, items, eligibility, logger);
         if (!pricing.ok) return { kind: "rejected", result: pricing.result };
 
         /* Το σύνολο που είδε ο πελάτης ≠ εξουσιοδοτημένο → ΚΑΜΙΑ εγγραφή */
@@ -682,7 +836,13 @@ export async function handleCheckoutRequest(
 
         tx.createOrderWithRecord({
           orderId,
-          order: buildOrderDocument(uid, request, pricing, deps.serverTimestamp()),
+          order: buildOrderDocument(
+            uid,
+            request,
+            pricing,
+            deps.serverTimestamp(),
+            deps.timestampFromMillis(decidedAt),
+          ),
           recordId,
           record: {
             uid,

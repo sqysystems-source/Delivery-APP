@@ -51,6 +51,7 @@ import {
 } from "@/lib/checkout/cart";
 import { CHECKOUT_LIMITS } from "@/lib/checkout/constants";
 import { lineKeyOf } from "@/lib/menu/options";
+import { requiresPostalCode } from "@/lib/shop/delivery-zones";
 import { lockScroll } from "@/lib/scroll-lock";
 import type {
   CartLine,
@@ -207,6 +208,9 @@ function toCartShopRef(shop: Shop): CartShopRef {
     minOrder: shop.minOrder,
     deliveryFee: shop.deliveryFee,
     freeDeliveryOver: shop.freeDeliveryOver,
+    /* Milestone 4: με ζώνες ΤΚ τα γενικά μεταφορικά δεν ισχύουν — το καλάθι
+     * δεν δείχνει ποσό που μπορεί να είναι λάθος (το ταμείο δείχνει τη ζώνη) */
+    ...(requiresPostalCode(shop as unknown as Record<string, unknown>) ? { zonedDelivery: true as const } : {}),
   };
 }
 

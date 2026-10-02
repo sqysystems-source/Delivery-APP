@@ -25,6 +25,8 @@ import LineOptionsSummary from "@/components/options/LineOptionsSummary";
 import type { CheckoutSuccess as CheckoutSuccessResult } from "@/types";
 import { PAYMENT_METHOD_LABELS } from "@/lib/checkout/constants";
 import { formatDeliveryFee, formatPrice } from "@/lib/format";
+import { readDeliveryTermsSnapshot } from "@/lib/shop/delivery-zones";
+import { formatPostalCode } from "@/lib/shop/postal-code";
 
 type CheckoutSuccessProps = {
   result: CheckoutSuccessResult;
@@ -40,6 +42,9 @@ export default function CheckoutSuccess({
   headingRef,
   onContinue,
 }: CheckoutSuccessProps) {
+  /* Milestone 4: ΤΚ/ζώνη από την ΕΠΑΛΗΘΕΥΜΕΝΗ απάντηση — οι αποθηκευμένες
+   * απαντήσεις από πριν το milestone 4 δεν το έχουν */
+  const deliveryTerms = readDeliveryTermsSnapshot(result.delivery);
   return (
     <div className="mx-auto w-full max-w-2xl px-4 py-10 sm:px-6">
       <div className="overflow-hidden rounded-3xl border border-gray-100 bg-white shadow-xl shadow-gray-900/5">
@@ -120,6 +125,12 @@ export default function CheckoutSuccess({
               <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" aria-hidden="true" />
               <span>
                 Παράδοση σε: <span className="font-semibold text-gray-900">{result.address}</span>
+                {deliveryTerms?.postalCode && <> · ΤΚ {formatPostalCode(deliveryTerms.postalCode)}</>}
+                {deliveryTerms?.mode === "zone" && (
+                  <span className="mt-0.5 block text-xs text-gray-500">
+                    Ζώνη παράδοσης «{deliveryTerms.zoneName}»
+                  </span>
+                )}
               </span>
             </p>
             <p className="flex items-start gap-2 text-gray-700">

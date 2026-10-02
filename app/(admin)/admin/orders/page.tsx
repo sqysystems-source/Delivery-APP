@@ -48,6 +48,7 @@ import { buildReceiptText } from "@/lib/admin/receipt";
 import { PAYMENT_METHOD_LABELS } from "@/lib/checkout/constants";
 import { formatPhoneForDisplay, phoneHref } from "@/lib/checkout/phone";
 import { cn, formatPrice } from "@/lib/format";
+import { formatPostalCode } from "@/lib/shop/postal-code";
 import type { OrderStatus } from "@/types";
 
 /* ==========================================================================
@@ -741,7 +742,12 @@ function OrderDetail({
               </span>
             </div>
             <div className="flex justify-between text-gray-600">
-              <span>Μεταφορικά</span>
+              <span>
+                Μεταφορικά
+                {order.deliveryTerms?.mode === "zone" && (
+                  <span className="text-xs text-gray-400"> · ζώνη «{order.deliveryTerms.zoneName}»</span>
+                )}
+              </span>
               <span className="font-semibold text-gray-900">
                 {formatPrice(order.deliveryFee)}
               </span>
@@ -896,6 +902,19 @@ function CustomerDeliveryDetails({ order }: { order: AdminOrder }) {
             {order.delivery.city ? `, ${order.delivery.city}` : ""}
           </p>
           <dl className="mt-0.5 space-y-0.5 text-sm text-gray-700">
+            {/* Milestone 4: ΤΚ και ζώνη από το στιγμιότυπο της παραγγελίας */}
+            {order.delivery.postalCode && (
+              <div className="flex gap-1.5">
+                <dt className="text-gray-500">ΤΚ:</dt>
+                <dd className="font-semibold">{formatPostalCode(order.delivery.postalCode)}</dd>
+              </div>
+            )}
+            {order.deliveryTerms?.mode === "zone" && (
+              <div className="flex gap-1.5">
+                <dt className="text-gray-500">Ζώνη:</dt>
+                <dd className="font-semibold">{order.deliveryTerms.zoneName}</dd>
+              </div>
+            )}
             {order.delivery.floor && (
               <div className="flex gap-1.5">
                 <dt className="text-gray-500">Όροφος:</dt>

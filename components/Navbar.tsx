@@ -24,6 +24,7 @@ import UserMenu from "@/components/UserMenu";
 import { useAuth } from "@/context/AuthContext";
 import { useCart } from "@/context/CartContext";
 import { cleanSingleLine, isUsableStreet } from "@/lib/checkout/validation";
+import { normalizePostalCode } from "@/lib/shop/postal-code";
 import { cn } from "@/lib/format";
 import type { UserAddress } from "@/lib/auth";
 
@@ -97,12 +98,15 @@ export default function Navbar() {
 
   const chooseAddress = (option: AddressOption) => {
     if (!option.usable || !user) return;
+    const postalCode = normalizePostalCode(option.address.postalCode);
     selectDeliveryAddress({
       sourceId: option.address.id,
       sourceUid: user.uid,
       label: cleanSingleLine(option.address.label),
       street: cleanSingleLine(option.address.street),
       city: cleanSingleLine(option.address.city ?? ""),
+      /* Milestone 4: ΤΚ μόνο αν η αποθηκευμένη διεύθυνση έχει έγκυρο ρητό ΤΚ */
+      ...(postalCode ? { postalCode } : {}),
       ...(option.address.notes ? { instructions: option.address.notes.trim() } : {}),
     });
     setIsOpen(false);

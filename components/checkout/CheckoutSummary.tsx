@@ -10,6 +10,11 @@
  *  Milestone 3: οι γραμμές αναγνωρίζονται από το κλειδί γραμμής (itemId +
  *  επιλογές), δείχνουν τις επιλογές τους και έχουν «Επεξεργασία». Η γραμμή
  *  που απέρριψε ο server λόγω επιλογών επισημαίνεται.
+ *
+ *  Milestone 4: με ζώνες ΤΚ τα σύνολα/οδηγίες έρχονται από τους όρους της
+ *  ζώνης (μέσω `totals`). Όσο δεν έχει βρεθεί ζώνη (ΤΚ κενός ή εκτός
+ *  περιοχής), τα μεταφορικά εμφανίζονται ως «εκκρεμούν» και δεν δείχνουμε
+ *  σύνολο ή οδηγίες ελάχιστης που θα μπορούσαν να είναι λάθος.
  * ========================================================================== */
 
 import type { ReactNode, RefObject } from "react";
@@ -29,6 +34,8 @@ export type PriceChangeNotice = {
   /** `key` = κλειδί γραμμής (itemId + επιλογές) */
   changes: Array<{ key: string; name: string; before: number; after: number }>;
   delivery: { before: number; after: number } | null;
+  /** Milestone 4: αλλαγή ζώνης παράδοσης (ονόματα· null = γενικοί όροι καταστήματος) */
+  zone?: { before: string | null; after: string | null } | null;
 };
 
 type CheckoutSummaryProps = {
@@ -47,6 +54,10 @@ type CheckoutSummaryProps = {
   linesError?: string;
   priceNotice: PriceChangeNotice | null;
   priceNoticeRef: RefObject<HTMLDivElement | null>;
+  /** Milestone 4: κείμενο στη θέση των μεταφορικών όσο δεν έχει βρεθεί ζώνη */
+  deliveryPending?: string | null;
+  /** Milestone 4: π.χ. «Ζώνη «Κέντρο» · ΤΚ 546 22» */
+  zoneLabel?: string | null;
   children: ReactNode;
 };
 
@@ -62,14 +73,16 @@ export default function CheckoutSummary({
   linesError,
   priceNotice,
   priceNoticeRef,
+  deliveryPending = null,
+  zoneLabel = null,
   children,
 }: CheckoutSummaryProps) {
   const shop = cart.shop;
 
-  const freeOver = shop?.freeDeliveryOver ?? null;
+  /* Milestone 4: από τους όρους που εφαρμόστηκαν (ζώνης ή καταστήματος) */
   const missingForFreeDelivery =
-    freeOver !== null && totals.deliveryFeeCents > 0
-      ? centsToEuros(toCents(freeOver) - totals.subtotalCents)
+    totals.missingForFreeDeliveryCents !== null && totals.deliveryFeeCents > 0
+      ? centsToEuros(totals.missingForFreeDeliveryCents)
       : null;
 
   return (
@@ -220,15 +233,20 @@ export default function CheckoutSummary({
           >
             <p className="flex items-center gap-2 font-black">
               <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
-              Οι τιμές άλλαξαν
+              {priceNotice.zone &&
+              priceNotice.changes.length === 0 &&
+              !priceNotice.delivery &&
+              priceNotice.previousTotalCents === priceNotice.newTotalCents
+                ? "Η περιοχή παράδοσης άλλαξε"
+                : "Οι τιμές άλλαξαν"}
             </p>
             <p className="mt-1.5 leading-relaxed">
-              Το κατάστημα ενημέρωσε τιμές ή μεταφορικά. Νέο σύνολο:{" "}
+              Το κατάστημα ενημέρωσε τιμές, μεταφορικά ή περιοχές παράδοσης. Νέο σύνολο:{" "}
               <strong>{formatPrice(centsToEuros(priceNotice.newTotalCents))}</strong> (αντί για{" "}
               {formatPrice(centsToEuros(priceNotice.previousTotalCents))}). Δεν στάλθηκε καμία
               παραγγελία — έλεγξε τη σύνοψη και επιβεβαίωσε ξανά.
             </p>
-            {(priceNotice.changes.length > 0 || priceNotice.delivery) && (
+            {(priceNotice.changes.length > 0 || priceNotice.delivery || priceNotice.zone) && (
               <ul className="mt-2 space-y-0.5 text-xs">
                 {priceNotice.changes.map((change) => (
                   <li key={change.key}>
@@ -239,6 +257,12 @@ export default function CheckoutSummary({
                   <li>
                     Μεταφορικά: {formatDeliveryFee(priceNotice.delivery.before)} →{" "}
                     {formatDeliveryFee(priceNotice.delivery.after)}
+                  </li>
+                )}
+                {priceNotice.zone && (
+                  <li>
+                    Περιοχή παράδοσης: {priceNotice.zone.before ?? "γενικοί όροι"} →{" "}
+                    {priceNotice.zone.after ?? "γενικοί όροι"}
                   </li>
                 )}
               </ul>
@@ -254,29 +278,40 @@ export default function CheckoutSummary({
           </div>
           <div className="flex items-center justify-between text-gray-600">
             <dt>Μεταφορικά</dt>
-            <dd
-              className={cn(
-                "font-semibold",
-                totals.deliveryFee === 0 ? "text-emerald-600" : "text-gray-900",
-              )}
-            >
-              {formatDeliveryFee(totals.deliveryFee)}
-            </dd>
+            {deliveryPending ? (
+              <dd className="text-right text-xs font-semibold text-amber-700">{deliveryPending}</dd>
+            ) : (
+              <dd
+                className={cn(
+                  "font-semibold",
+                  totals.deliveryFee === 0 ? "text-emerald-600" : "text-gray-900",
+                )}
+              >
+                {formatDeliveryFee(totals.deliveryFee)}
+              </dd>
+            )}
           </div>
+          {zoneLabel && !deliveryPending && (
+            <p className="text-right text-xs text-gray-500" data-testid="checkout-zone-label">
+              {zoneLabel}
+            </p>
+          )}
           <div className="flex items-center justify-between border-t border-dashed border-gray-200 pt-2.5 text-base">
             <dt className="font-bold text-gray-900">Σύνολο</dt>
-            <dd className="text-xl font-black text-gray-900">{formatPrice(totals.total)}</dd>
+            <dd className="text-xl font-black text-gray-900">
+              {deliveryPending ? "—" : formatPrice(totals.total)}
+            </dd>
           </div>
         </dl>
 
-        {missingForFreeDelivery !== null && missingForFreeDelivery > 0 && (
+        {!deliveryPending && missingForFreeDelivery !== null && missingForFreeDelivery > 0 && (
           <p className="flex items-start gap-2 text-xs text-gray-600">
             <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" aria-hidden="true" />
             Πρόσθεσε ακόμη {formatPrice(missingForFreeDelivery)} για δωρεάν μεταφορικά.
           </p>
         )}
 
-        {totals.missingForMinOrderCents > 0 && shop && (
+        {!deliveryPending && totals.missingForMinOrderCents > 0 && shop && (
           <div
             id="checkout-min-order"
             className="rounded-xl bg-amber-50 px-3 py-2.5 text-xs font-semibold text-amber-800"

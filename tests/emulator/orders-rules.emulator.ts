@@ -11,6 +11,10 @@
  *    • ο πελάτης δεν γράφει ποτέ (status, create, delete, checkoutRequests)
  *    • ο καταστηματάρχης κάνει ΜΟΝΟ τις μεταβάσεις του ταμπλό
  *    • ζωντανή ενημέρωση: αλλαγή από το ταμπλό → φαίνεται στον listener του πελάτη
+ *
+ *  Milestone 4 (στο τέλος του αρχείου): POST /api/orders και
+ *  /api/admin/shop-settings με ΠΡΑΓΜΑΤΙΚΕΣ συναλλαγές Admin SDK (ωράριο, ζώνες
+ *  ΤΚ, στιγμιότυπο όρων, επανάληψη/ανάκτηση μετά το κλείσιμο).
  * ========================================================================== */
 
 import { readFileSync } from "node:fs";
@@ -38,7 +42,27 @@ import {
   where,
   type Firestore,
 } from "firebase/firestore";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+/* Milestone 4 (τέλος αρχείου): οι services του server με ΠΡΑΓΜΑΤΙΚΕΣ συναλλαγές */
+import { deleteApp, initializeApp, type App } from "firebase-admin/app";
+import {
+  FieldValue,
+  Timestamp as AdminTimestamp,
+  getFirestore as getAdminFirestore,
+  type Firestore as AdminFirestore,
+} from "firebase-admin/firestore";
+import {
+  handleAttemptRecovery,
+  handleCheckoutRequest,
+  type CheckoutDeps,
+} from "@/lib/server/checkout-service";
+import { createFirestoreCheckoutStore } from "@/lib/server/firestore-checkout-store";
+import { handleShopSettingsWrite, type ShopSettingsDeps } from "@/lib/server/shop-settings-service";
+import { createFirestoreShopSettingsStore } from "@/lib/server/firestore-shop-settings-store";
+import { instantsForWallTime } from "@/lib/shop/timezone";
+
+/* Το "server-only" υπάρχει μόνο μέσα στο Next — στα tests είναι κενό */
+vi.mock("server-only", () => ({}));
 
 /* ------------------------- Φραγμός: ΠΟΤΕ παραγωγή ------------------------- */
 
@@ -368,5 +392,211 @@ describe("παρακολούθηση: ο listener του πελάτη βλέπε
       );
     });
     expect(error.code).toBe("permission-denied");
+  });
+});
+
+/* ==========================================================================
+ *  Milestone 4 — ωράριο + ζώνες ΤΚ με ΠΡΑΓΜΑΤΙΚΕΣ συναλλαγές Firestore
+ *
+ *  (Στο ΙΔΙΟ αρχείο, ώστε η υπάρχουσα ρύθμιση του `npm run test:rules` να τα
+ *  τρέχει χωρίς καμία αλλαγή.)
+ *
+ *  Σε αντίθεση με τα unit tests (ψεύτικο store), εδώ τρέχουν οι ΠΡΑΓΜΑΤΙΚΟΙ
+ *  adapters (firestore-checkout-store / firestore-shop-settings-store) με το
+ *  Admin SDK πάνω στον emulator (FIRESTORE_EMULATOR_HOST, project demo-*):
+ *    • ρυθμίσεις: έλεγχος ιδιοκτήτη μέσα στη συναλλαγή, update που κρατά τα
+ *      άσχετα πεδία, άκυρη ρύθμιση → καμία εγγραφή
+ *    • παραγγελία σε ζώνη: ποσά ζώνης, στιγμιότυπο όρων, ΤΚ, στιγμή κρίσης
+ *    • κλειστό κατάστημα / ΤΚ εκτός ζώνης → ΚΑΝΕΝΑ έγγραφο
+ *    • επανάληψη και ανάκτηση ΜΕΤΑ το κλείσιμο → η αρχική παραγγελία
+ * ========================================================================== */
+
+describe("milestone 4: ωράριο + ζώνες με πραγματικές συναλλαγές (Admin SDK)", () => {
+  const M4_SHOP = "shop-m4";
+
+  const athens = (date: string, time: string) => {
+    const [hours, minutes] = time.split(":").map(Number);
+    return instantsForWallTime(date, hours * 60 + minutes)[0];
+  };
+
+  const HOURS = {
+    enabled: true,
+    weekly: { mon: [{ open: "12:00", close: "23:00" }], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] },
+    exceptions: [],
+  };
+  const ZONE = {
+    id: "zcenter",
+    name: "Κέντρο",
+    available: true,
+    postalCodes: ["01234", "54622"],
+    deliveryFeeCents: 150,
+    minOrderCents: 800,
+    freeDeliveryOverCents: 2000,
+  };
+
+  let adminApp: App;
+  let adminDb: AdminFirestore;
+  let nowMs = 0;
+
+  const verifyIdToken = async (token: string) => {
+    if (token.startsWith("uid-")) return { uid: token.slice(4) };
+    throw new Error("bad token");
+  };
+
+  const checkoutDeps = (): CheckoutDeps => ({
+    store: createFirestoreCheckoutStore(adminDb),
+    verifyIdToken,
+    serverTimestamp: () => FieldValue.serverTimestamp(),
+    timestampFromMillis: (ms) => AdminTimestamp.fromMillis(ms),
+    now: () => nowMs,
+    logger: { error: vi.fn(), warn: vi.fn() },
+  });
+
+  const settingsDeps = (): ShopSettingsDeps => ({
+    store: createFirestoreShopSettingsStore(adminDb),
+    verifyIdToken,
+    serverTimestamp: () => FieldValue.serverTimestamp(),
+    logger: { error: vi.fn() },
+  });
+
+  const checkoutBody = (key: string, overrides: Record<string, unknown> = {}) => ({
+    idempotencyKey: key,
+    shopId: M4_SHOP,
+    customer: { fullName: "Κώστας Παπαδόπουλος", phone: "6912345678" },
+    delivery: { street: "Ερμού 5", city: "Θεσσαλονίκη", postalCode: "546 22" },
+    paymentMethod: "cash_on_delivery",
+    lines: [{ itemId: "margherita", quantity: 1 }],
+    expectedTotalCents: 1000,
+    expectedDeliveryZoneId: "zcenter",
+    ...overrides,
+  });
+
+  const ordersOf = async (userId: string) =>
+    (await adminDb.collection("orders").where("userId", "==", userId).get()).size;
+
+  beforeAll(() => {
+    adminApp = initializeApp({ projectId: PROJECT_ID }, `buka-m4-${Date.now()}`);
+    adminDb = getAdminFirestore(adminApp);
+  });
+
+  afterAll(async () => {
+    if (adminApp) await deleteApp(adminApp);
+  });
+
+  /* Το εξωτερικό beforeEach αδειάζει τη βάση — ξαναστήνουμε το κατάστημα */
+  beforeEach(async () => {
+    nowMs = athens("2026-10-05", "13:00"); // Δευτέρα, ανοιχτό
+    await adminDb.doc(`shops/${M4_SHOP}`).set({
+      name: "Pizza M4",
+      ownerUid: "owner-m4",
+      active: true,
+      minOrder: 8,
+      deliveryFee: 1.5,
+      freeDeliveryOver: 20,
+      rating: 4.7,
+      openingHours: HOURS,
+      deliveryZones: { enabled: true, zones: [ZONE] },
+    });
+    await adminDb.doc(`shops/${M4_SHOP}/menuItems/margherita`).set({
+      shopId: M4_SHOP,
+      categoryId: "pizzas",
+      name: "Margherita",
+      price: 8.5,
+    });
+  });
+
+  it("ρυθμίσεις: ο ιδιοκτήτης αποθηκεύει, τα άσχετα πεδία μένουν· ξένος → 403", async () => {
+    const saved = await handleShopSettingsWrite(settingsDeps(), {
+      authorization: "Bearer uid-owner-m4",
+      rawBody: JSON.stringify({
+        shopId: M4_SHOP,
+        deliveryZones: { enabled: true, zones: [{ ...ZONE, postalCodes: ["546 23", "012 34"] }] },
+      }),
+    });
+    expect(saved.status).toBe(200);
+    const shop = (await adminDb.doc(`shops/${M4_SHOP}`).get()).data() ?? {};
+    expect(shop).toMatchObject({ name: "Pizza M4", ownerUid: "owner-m4", active: true, minOrder: 8, rating: 4.7 });
+    expect(shop.openingHours).toEqual(HOURS);
+    expect(shop.deliveryZones.zones[0].postalCodes).toEqual(["01234", "54623"]);
+    expect(shop.updatedAt).toBeInstanceOf(AdminTimestamp);
+
+    const intruder = await handleShopSettingsWrite(settingsDeps(), {
+      authorization: "Bearer uid-intruder",
+      rawBody: JSON.stringify({ shopId: M4_SHOP, deliveryZones: null }),
+    });
+    expect(intruder.status).toBe(403);
+    expect((await adminDb.doc(`shops/${M4_SHOP}`).get()).data()?.deliveryZones).toBeTruthy();
+  });
+
+  it("ρυθμίσεις: άκυρη ρύθμιση (ΤΚ σε δύο ζώνες) → 400, η βάση μένει ίδια", async () => {
+    const result = await handleShopSettingsWrite(settingsDeps(), {
+      authorization: "Bearer uid-owner-m4",
+      rawBody: JSON.stringify({
+        shopId: M4_SHOP,
+        deliveryZones: { enabled: true, zones: [ZONE, { ...ZONE, id: "zdup", name: "Διπλή" }] },
+      }),
+    });
+    expect(result.status).toBe(400);
+    expect((await adminDb.doc(`shops/${M4_SHOP}`).get()).data()?.deliveryZones.zones).toHaveLength(1);
+  });
+
+  it("παραγγελία σε ζώνη + επανάληψη/ανάκτηση ΜΕΤΑ το κλείσιμο", async () => {
+    const key = "m4-emulator-ok-000000001";
+    const created = await handleCheckoutRequest(checkoutDeps(), {
+      authorization: "Bearer uid-m4-cust",
+      rawBody: JSON.stringify(checkoutBody(key)),
+    });
+    expect(created.status).toBe(201);
+    const orderId = (created.body as { orderId: string }).orderId;
+
+    const order = (await adminDb.doc(`orders/${orderId}`).get()).data() ?? {};
+    expect(order).toMatchObject({ totalCents: 1000, deliveryFeeCents: 150 });
+    expect(order.delivery).toMatchObject({ postalCode: "54622" });
+    expect(order.deliveryTerms).toMatchObject({ mode: "zone", zoneId: "zcenter", zoneName: "Κέντρο" });
+    expect((order.eligibilityCheckedAt as InstanceType<typeof AdminTimestamp>).toMillis()).toBe(nowMs);
+
+    /* Το κατάστημα μπαίνει σε παύση και οι ζώνες απενεργοποιούνται… */
+    await adminDb.doc(`shops/${M4_SHOP}`).update({ active: false, "deliveryZones.enabled": false });
+    nowMs = athens("2026-10-05", "23:30");
+
+    /* …η επανάληψη επιστρέφει την ΑΡΧΙΚΗ παραγγελία */
+    const retry = await handleCheckoutRequest(checkoutDeps(), {
+      authorization: "Bearer uid-m4-cust",
+      rawBody: JSON.stringify(checkoutBody(key)),
+    });
+    expect(retry.status).toBe(200);
+    expect(retry.body).toMatchObject({ orderId, replayed: true });
+
+    /* …και η ανάκτηση τη βρίσκει */
+    const recovered = await handleAttemptRecovery(checkoutDeps(), {
+      authorization: "Bearer uid-m4-cust",
+      rawBody: JSON.stringify({ idempotencyKey: key }),
+    });
+    expect(recovered.body).toMatchObject({ outcome: "order_found", order: { orderId } });
+    expect(await ordersOf("m4-cust")).toBe(1);
+  });
+
+  it("εκτός ωραρίου → shop_closed και ΚΑΝΕΝΑ έγγραφο", async () => {
+    nowMs = athens("2026-10-05", "23:00");
+    const result = await handleCheckoutRequest(checkoutDeps(), {
+      authorization: "Bearer uid-m4-closed",
+      rawBody: JSON.stringify(checkoutBody("m4-emulator-closed-00001")),
+    });
+    expect(result.status).toBe(409);
+    expect(result.body).toMatchObject({ code: "shop_closed" });
+    expect(await ordersOf("m4-closed")).toBe(0);
+  });
+
+  it("ΤΚ εκτός ζώνης → delivery_zone_unsupported και ΚΑΝΕΝΑ έγγραφο", async () => {
+    const result = await handleCheckoutRequest(checkoutDeps(), {
+      authorization: "Bearer uid-m4-zone",
+      rawBody: JSON.stringify(
+        checkoutBody("m4-emulator-zone-0000001", {
+          delivery: { street: "Ερμού 5", city: "Αθήνα", postalCode: "10431" },
+        }),
+      ),
+    });
+    expect(result.body).toMatchObject({ code: "delivery_zone_unsupported" });
+    expect(await ordersOf("m4-zone")).toBe(0);
   });
 });

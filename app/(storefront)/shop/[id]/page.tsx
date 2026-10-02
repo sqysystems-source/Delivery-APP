@@ -13,9 +13,17 @@
  *    • Strip πληροφοριών (βαθμολογία / χρόνος / μεταφορικά / ελάχιστη)
  *    • Sticky CategoryPills + sections προϊόντων (MenuItemRow)
  *    • CartPanel ως sticky sidebar από lg και πάνω
+ *
+ *  Milestone 4:
+ *    • Ζωντανή διαθεσιμότητα (ένας onSnapshot listener στο κατάστημα +
+ *      χρονόμετρο για το επόμενο όριο ωραρίου): «Ανοιχτό» / «Κλειστό» /
+ *      «Προσωρινά μη διαθέσιμο», πότε ανοίγει, εβδομαδιαίο ωράριο.
+ *    • Ο κατάλογος μένει περιηγήσιμος και όταν είναι κλειστό· η υποβολή
+ *      μπλοκάρεται στο checkout και στον server.
+ *    • Ζώνες ΤΚ: όροι ανά ζώνη και έλεγχος «εξυπηρετεί τον ΤΚ μου;».
  * ========================================================================== */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { notFound, useParams } from "next/navigation";
 import {
@@ -31,7 +39,14 @@ import CategoryPills, {
 } from "@/components/CategoryPills";
 import MenuItemRow, { MenuItemRowSkeleton } from "@/components/MenuItemRow";
 import { CartPanel } from "@/components/CartDrawer";
+import AvailabilityBadge from "@/components/shop/AvailabilityBadge";
+import DeliveryZonesInfo from "@/components/shop/DeliveryZonesInfo";
+import ShopAvailabilityPanel from "@/components/shop/ShopAvailabilityPanel";
+import { useLiveShop } from "@/hooks/useLiveShop";
+import { useShopAvailability } from "@/hooks/useShopAvailability";
 import { fetchMenu, fetchShopById } from "@/lib/data";
+import { centsToEuros } from "@/lib/checkout/money";
+import { parseDeliveryZones, summarizeZones } from "@/lib/shop/delivery-zones";
 import {
   TAG_TONES,
   cn,
@@ -47,10 +62,14 @@ export default function ShopPage() {
   const params = useParams();
   const shopId = typeof params?.id === "string" ? params.id : "";
 
-  const [shop, setShop] = useState<Shop | null>(null);
-  const [menu, setMenu] = useState<Menu | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [missing, setMissing] = useState(false);
+  /* Τα φορτωμένα δεδομένα «φέρουν» το shopId τους: σε αλλαγή καταστήματος η
+   * σελίδα δείχνει αμέσως skeleton, χωρίς setState μέσα στο effect. */
+  const [loaded, setLoaded] = useState<{
+    shopId: string;
+    shop: Shop | null;
+    menu: Menu | null;
+    loadedAt: number;
+  } | null>(null);
   const [activeCategory, setActiveCategory] = useState("");
 
   /* -------------------------- Φόρτωση δεδομένων -------------------------- */
@@ -58,30 +77,43 @@ export default function ShopPage() {
     if (!shopId) return;
     let cancelled = false;
 
-    setIsLoading(true);
-    setMissing(false);
-
     Promise.all([fetchShopById(shopId), fetchMenu(shopId)])
       .then(([shopData, menuData]) => {
         if (cancelled) return;
-
-        if (!shopData) {
-          setMissing(true);
-          return;
-        }
-
-        setShop(shopData);
-        setMenu(menuData);
-        setActiveCategory(menuData.categories[0]?.id ?? "");
+        setLoaded({ shopId, shop: shopData, menu: shopData ? menuData : null, loadedAt: Date.now() });
+        if (shopData) setActiveCategory(menuData.categories[0]?.id ?? "");
       })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false);
+      .catch((error) => {
+        console.error("[shop] Αποτυχία φόρτωσης καταστήματος:", error);
       });
 
     return () => {
       cancelled = true;
     };
   }, [shopId]);
+
+  const current = loaded && loaded.shopId === shopId ? loaded : null;
+  const shop = current?.shop ?? null;
+  const menu = current?.menu ?? null;
+  const missing = current !== null && current.shop === null;
+  const isLoading = current === null;
+
+  /* -------- Milestone 4: ζωντανή ρύθμιση (παύση, ωράριο, ζώνες) ---------- */
+  const live = useLiveShop(shopId || null);
+  const liveData = live.status === "ready" ? live.data : null;
+  const settingsSource = useMemo<Record<string, unknown> | null>(
+    () => liveData ?? (shop ? (shop as unknown as Record<string, unknown>) : null),
+    [liveData, shop],
+  );
+  const { availability, now } = useShopAvailability(
+    settingsSource,
+    liveData ? live.receivedAt : (current?.loadedAt ?? 0),
+  );
+  const zones = useMemo(() => {
+    const parsed = parseDeliveryZones(settingsSource?.deliveryZones);
+    return parsed.kind === "config" && parsed.config.enabled ? parsed.config : null;
+  }, [settingsSource]);
+  const zoneSummary = zones ? summarizeZones(zones) : null;
 
   /* ------------ Scroll-spy: ενημέρωση ενεργής κατηγορίας ----------------- */
   useEffect(() => {
@@ -166,6 +198,10 @@ export default function ShopPage() {
             </span>
           )}
 
+          {availability && (
+            <AvailabilityBadge state={availability.state} className="mb-3 ml-2 first:ml-0" />
+          )}
+
           <h1 className="text-3xl font-black tracking-tight text-white sm:text-5xl">
             {shop.name}
           </h1>
@@ -192,12 +228,21 @@ export default function ShopPage() {
             {
               icon: Bike,
               label: "Μεταφορικά",
-              value: formatDeliveryFee(shop.deliveryFee),
+              /* Milestone 4: με ζώνες ΤΚ τα μεταφορικά εξαρτώνται από την περιοχή */
+              value: zoneSummary
+                ? zoneSummary.minDeliveryFeeCents === null
+                  ? "Ανά ΤΚ"
+                  : `από ${formatDeliveryFee(centsToEuros(zoneSummary.minDeliveryFeeCents))}`
+                : formatDeliveryFee(shop.deliveryFee),
             },
             {
               icon: ShoppingBag,
               label: "Ελάχιστη",
-              value: formatPrice(shop.minOrder),
+              value: zoneSummary
+                ? zoneSummary.minMinOrderCents === null
+                  ? "Ανά ΤΚ"
+                  : `από ${formatPrice(centsToEuros(zoneSummary.minMinOrderCents))}`
+                : formatPrice(shop.minOrder),
             },
           ].map((info) => (
             <div key={info.label} className="flex items-center gap-3">
@@ -216,7 +261,11 @@ export default function ShopPage() {
           ))}
         </div>
 
-        {shop.freeDeliveryOver !== null && (
+        {availability && <ShopAvailabilityPanel availability={availability} now={now} />}
+
+        {zones && <DeliveryZonesInfo config={zones} />}
+
+        {!zones && shop.freeDeliveryOver !== null && (
           <div className="mt-4 flex items-start gap-3 rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-sm text-emerald-800">
             <Info className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
             <p>

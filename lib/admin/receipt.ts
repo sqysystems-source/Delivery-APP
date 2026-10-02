@@ -16,6 +16,7 @@ import { PAYMENT_METHOD_LABELS } from "@/lib/checkout/constants";
 import { formatPhoneForDisplay } from "@/lib/checkout/phone";
 import { formatPrice } from "@/lib/format";
 import { formatOptionLines } from "@/lib/menu/options";
+import { formatPostalCode } from "@/lib/shop/postal-code";
 
 export const RECEIPT_WIDTH = 32;
 const PRICE_COLUMN = 8;
@@ -87,6 +88,9 @@ export function buildReceiptText(order: AdminOrder): string {
   if (order.delivery) {
     out.push(...wrapText(order.delivery.street));
     if (order.delivery.city) out.push(...wrapText(order.delivery.city));
+    /* Milestone 4: ΤΚ και ζώνη από το ΣΤΙΓΜΙΟΤΥΠΟ της παραγγελίας */
+    if (order.delivery.postalCode) out.push(`ΤΚ: ${formatPostalCode(order.delivery.postalCode)}`);
+    if (order.deliveryTerms?.mode === "zone") out.push(...labelled("Ζώνη", order.deliveryTerms.zoneName));
     if (order.delivery.floor) out.push(...labelled("Όροφος", order.delivery.floor));
     if (order.delivery.doorbell) out.push(...labelled("Κουδούνι", order.delivery.doorbell));
     if (order.delivery.instructions) {

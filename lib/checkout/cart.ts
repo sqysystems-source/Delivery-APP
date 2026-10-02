@@ -34,6 +34,7 @@ import {
   parseItemPriceCents,
   parseShopTerms,
   toCents,
+  type ShopTermsCents,
 } from "@/lib/checkout/money";
 import { cleanSingleLine, isValidDocumentId } from "@/lib/checkout/validation";
 import {
@@ -81,6 +82,8 @@ function parseShopRef(raw: unknown): CartShopRef | null {
       terms.terms.freeDeliveryOverCents === null
         ? null
         : centsToEuros(terms.terms.freeDeliveryOverCents),
+    // Milestone 4: μόνο το ρητό true — οτιδήποτε άλλο = όπως πριν
+    ...(shop.zonedDelivery === true ? { zonedDelivery: true as const } : {}),
   };
 }
 
@@ -326,20 +329,27 @@ export function replaceCartLine(current: CartState, oldKey: string, next: CartLi
  *  ΣΥΝΟΛΑ
  * ========================================================================== */
 
-export function computeCartTotals(cart: CartState): CartTotals {
+/**
+ * Milestone 4: `termsOverride` = οι όροι της ζώνης ΤΚ (όταν το κατάστημα έχει
+ * ζώνες). Χωρίς αυτό ισχύουν οι όροι του καταστήματος στο καλάθι, όπως πριν.
+ * Το υποσύνολο περιλαμβάνει πάντα τις επιλογές (η τιμή μονάδας τις έχει ήδη).
+ */
+export function computeCartTotals(cart: CartState, termsOverride?: ShopTermsCents): CartTotals {
   const itemCount = cart.lines.reduce((sum, line) => sum + line.quantity, 0);
   const subtotalCents = cart.lines.reduce(
     (sum, line) => sum + toCents(line.unitPrice) * line.quantity,
     0,
   );
 
-  const termsResult = cart.shop
-    ? parseShopTerms({
-        minOrder: cart.shop.minOrder,
-        deliveryFee: cart.shop.deliveryFee,
-        freeDeliveryOver: cart.shop.freeDeliveryOver,
-      })
-    : null;
+  const termsResult = termsOverride
+    ? ({ ok: true, terms: termsOverride } as const)
+    : cart.shop
+      ? parseShopTerms({
+          minOrder: cart.shop.minOrder,
+          deliveryFee: cart.shop.deliveryFee,
+          freeDeliveryOver: cart.shop.freeDeliveryOver,
+        })
+      : null;
 
   const terms =
     termsResult && termsResult.ok
@@ -360,6 +370,8 @@ export function computeCartTotals(cart: CartState): CartTotals {
     totalCents: totals.totalCents,
     minOrderCents: terms.minOrderCents,
     missingForMinOrderCents: totals.missingForMinOrderCents,
+    freeDeliveryOverCents: terms.freeDeliveryOverCents,
+    missingForFreeDeliveryCents: totals.missingForFreeDeliveryCents,
     exceedsMaxOrder: totals.totalCents > CHECKOUT_LIMITS.maxOrderTotalCents,
     canCheckout:
       cart.lines.length > 0 &&
@@ -427,15 +439,20 @@ export function applyQuoteToCart(current: CartState, quote: CheckoutQuote): Cart
   if (!current.shop || current.shop.id !== quote.shopId) return current;
 
   const verified = new Map(quote.lines.map((line) => [lineKeyOf(line), line]));
+  /* Milestone 4: οι όροι ΖΩΝΗΣ ισχύουν μόνο για έναν ΤΚ — δεν γίνονται γενικοί
+   * όροι του καταστήματος στο καλάθι (το checkout τους κρατά χωριστά). */
+  const zoneTerms = quote.delivery?.mode === "zone";
 
   return {
-    shop: {
-      ...current.shop,
-      name: quote.shopName,
-      minOrder: quote.shopTerms.minOrder,
-      deliveryFee: quote.shopTerms.deliveryFee,
-      freeDeliveryOver: quote.shopTerms.freeDeliveryOver,
-    },
+    shop: zoneTerms
+      ? { ...current.shop, name: quote.shopName }
+      : {
+          ...current.shop,
+          name: quote.shopName,
+          minOrder: quote.shopTerms.minOrder,
+          deliveryFee: quote.shopTerms.deliveryFee,
+          freeDeliveryOver: quote.shopTerms.freeDeliveryOver,
+        },
     lines: current.lines.map((line) => {
       const match = verified.get(lineKeyOf(line));
       if (!match) return line;

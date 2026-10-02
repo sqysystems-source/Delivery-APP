@@ -19,6 +19,7 @@ import type {
 import { CHECKOUT_LIMITS, isPaymentMethod } from "@/lib/checkout/constants";
 import { normalizePhone } from "@/lib/checkout/phone";
 import { canonicalizeSelections, cartLineKey } from "@/lib/menu/options";
+import { POSTAL_CODE_INPUT_MAX, normalizePostalCode } from "@/lib/shop/postal-code";
 
 /* ==========================================================================
  *  ΚΑΘΑΡΙΣΜΟΣ ΚΕΙΜΕΝΟΥ
@@ -194,6 +195,23 @@ export function validateCity(value: string): string | null {
   return null;
 }
 
+/**
+ * Milestone 4: ταχυδρομικός κώδικας. Κενός επιτρέπεται εδώ (καταστήματα
+ * χωρίς ζώνες ΤΚ)· το «υποχρεωτικό» το αποφασίζει η ρύθμιση του καταστήματος
+ * — στη φόρμα μέσω `required`, στον server μέσω resolveDeliveryTerms.
+ */
+export function validatePostalCode(value: string, required = false): string | null {
+  if (!value) {
+    return required
+      ? "Συμπλήρωσε τον ταχυδρομικό κώδικα — το κατάστημα εξυπηρετεί συγκεκριμένες περιοχές."
+      : null;
+  }
+  if (value.length > POSTAL_CODE_INPUT_MAX || normalizePostalCode(value) === null) {
+    return "Ο ταχυδρομικός κώδικας πρέπει να έχει 5 ψηφία (π.χ. 546 22).";
+  }
+  return null;
+}
+
 function validateOptionalText(value: string, max: number, what: string): string | null {
   if (value.length > max) return `${what}: έως ${max} χαρακτήρες.`;
   return null;
@@ -229,6 +247,8 @@ export type CheckoutFormValues = {
   phone: string;
   street: string;
   city: string;
+  /** Milestone 4 — όπως τον γράφει ο πελάτης («546 22»)· κανονικοποιείται στην αποστολή */
+  postalCode: string;
   floor: string;
   doorbell: string;
   instructions: string;
@@ -242,12 +262,22 @@ export const CHECKOUT_FORM_FIELDS: readonly CheckoutFormField[] = [
   "phone",
   "street",
   "city",
+  "postalCode",
   "floor",
   "doorbell",
   "instructions",
 ];
 
-export function validateFormField(field: CheckoutFormField, raw: string): string | null {
+export type CheckoutFormOptions = {
+  /** Milestone 4: το κατάστημα έχει ενεργές ζώνες ΤΚ */
+  postalCodeRequired?: boolean;
+};
+
+export function validateFormField(
+  field: CheckoutFormField,
+  raw: string,
+  options: CheckoutFormOptions = {},
+): string | null {
   switch (field) {
     case "fullName":
       return validateFullName(cleanSingleLine(raw));
@@ -257,6 +287,8 @@ export function validateFormField(field: CheckoutFormField, raw: string): string
       return validateStreet(cleanSingleLine(raw));
     case "city":
       return validateCity(cleanSingleLine(raw));
+    case "postalCode":
+      return validatePostalCode(cleanSingleLine(raw), options.postalCodeRequired === true);
     case "floor":
       return validateFloor(cleanSingleLine(raw));
     case "doorbell":
@@ -269,10 +301,11 @@ export function validateFormField(field: CheckoutFormField, raw: string): string
 export function validateCheckoutForm(
   values: CheckoutFormValues,
   notes: string,
+  options: CheckoutFormOptions = {},
 ): CheckoutFieldErrors {
   const errors: CheckoutFieldErrors = {};
   for (const field of CHECKOUT_FORM_FIELDS) {
-    const error = validateFormField(field, values[field]);
+    const error = validateFormField(field, values[field] ?? "", options);
     if (error) errors[field] = error;
   }
   const notesError = validateNotes(cleanMultiLine(notes));
@@ -285,10 +318,13 @@ export function buildDeliveryFromForm(values: CheckoutFormValues): CheckoutDeliv
   const floor = cleanSingleLine(values.floor);
   const doorbell = cleanSingleLine(values.doorbell);
   const instructions = cleanMultiLine(values.instructions);
+  /* Milestone 4: ΜΟΝΟ κανονικός ΤΚ φεύγει· κενός → κανένα πεδίο (ίδιο αίτημα με πριν) */
+  const postalCode = normalizePostalCode(cleanSingleLine(values.postalCode ?? ""));
 
   return {
     street: cleanSingleLine(values.street),
     city: cleanSingleLine(values.city),
+    ...(postalCode ? { postalCode } : {}),
     ...(floor ? { floor } : {}),
     ...(doorbell ? { doorbell } : {}),
     ...(instructions ? { instructions } : {}),
@@ -415,6 +451,8 @@ export type ValidatedCheckoutRequest = {
   paymentMethod: PaymentMethod;
   lines: CheckoutLineInput[];
   expectedTotalCents: number;
+  /** Milestone 4: μόνο όταν ο πελάτης είδε ζώνη ΤΚ */
+  expectedDeliveryZoneId?: string;
 };
 
 export type CheckoutRequestValidation =
@@ -485,6 +523,7 @@ export function validateCheckoutRequest(raw: unknown): CheckoutRequestValidation
   const fields = {
     street: optionalString(delivery.street),
     city: optionalString(delivery.city),
+    postalCode: optionalString(delivery.postalCode),
     floor: optionalString(delivery.floor),
     doorbell: optionalString(delivery.doorbell),
     instructions: optionalString(delivery.instructions),
@@ -500,6 +539,14 @@ export function validateCheckoutRequest(raw: unknown): CheckoutRequestValidation
   if (streetError) errors.street = streetError;
   const cityError = fields.city.ok ? validateCity(city) : "Μη έγκυρη πόλη.";
   if (cityError) errors.city = cityError;
+  /* Milestone 4: ΤΚ προαιρετικός εδώ — αν δοθεί, πρέπει να είναι έγκυρος. Το
+   * «υποχρεωτικός» το ελέγχει ο server με τη ρύθμιση ζωνών του καταστήματος. */
+  const postalCodeInput = cleanSingleLine(fields.postalCode.value);
+  const postalCodeError = fields.postalCode.ok
+    ? validatePostalCode(postalCodeInput)
+    : "Μη έγκυρος ταχυδρομικός κώδικας.";
+  if (postalCodeError) errors.postalCode = postalCodeError;
+  const postalCode = postalCodeError ? null : normalizePostalCode(postalCodeInput);
   const floorError = fields.floor.ok ? validateFloor(floor) : "Μη έγκυρος όροφος.";
   if (floorError) errors.floor = floorError;
   const doorbellError = fields.doorbell.ok ? validateDoorbell(doorbell) : "Μη έγκυρο κουδούνι.";
@@ -508,6 +555,16 @@ export function validateCheckoutRequest(raw: unknown): CheckoutRequestValidation
     ? validateInstructions(instructions)
     : "Μη έγκυρες οδηγίες.";
   if (instructionsError) errors.instructions = instructionsError;
+
+  /* ------------------ Ζώνη που είδε ο πελάτης (milestone 4) ---------------- */
+  const expectedZone = body.expectedDeliveryZoneId;
+  if (
+    expectedZone !== undefined &&
+    expectedZone !== null &&
+    !(typeof expectedZone === "string" && /^[A-Za-z0-9_-]{1,24}$/.test(expectedZone))
+  ) {
+    errors.expectedDeliveryZoneId = "Μη έγκυρη ζώνη παράδοσης.";
+  }
 
   /* ----------------------------- Σχόλια ---------------------------- */
   const notesRaw = optionalString(body.notes);
@@ -532,6 +589,9 @@ export function validateCheckoutRequest(raw: unknown): CheckoutRequestValidation
       delivery: {
         street,
         city,
+        /* Milestone 4: μόνο όταν δόθηκε — αιτήματα χωρίς ΤΚ κρατούν το ΙΔΙΟ
+         * κανονικό σχήμα (και το ίδιο hash idempotency) με πριν */
+        ...(postalCode ? { postalCode } : {}),
         ...(floor ? { floor } : {}),
         ...(doorbell ? { doorbell } : {}),
         ...(instructions ? { instructions } : {}),
@@ -540,6 +600,7 @@ export function validateCheckoutRequest(raw: unknown): CheckoutRequestValidation
       paymentMethod: body.paymentMethod as PaymentMethod,
       lines: lines.lines,
       expectedTotalCents: expected as number,
+      ...(typeof expectedZone === "string" ? { expectedDeliveryZoneId: expectedZone } : {}),
     },
   };
 }

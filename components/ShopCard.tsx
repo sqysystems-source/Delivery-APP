@@ -8,10 +8,17 @@
  *  ώστε να μην ακολουθεί το link.
  *
  *  Περιλαμβάνει και το <ShopCardSkeleton /> για τα loading states.
+ *
+ *  Milestone 4: ετικέτα «Κλειστό» / «Προσωρινά μη διαθέσιμο» (και «Ανοιχτό»
+ *  όταν το κατάστημα έχει ωράριο). Ενημερώνεται μόνη της στο επόμενο όριο
+ *  ωραρίου (χρονόμετρο) και όταν η καρτέλα ξαναγίνεται ορατή.
  * ========================================================================== */
 
 import Link from "next/link";
 import { Clock, Heart, Star } from "lucide-react";
+import AvailabilityBadge from "@/components/shop/AvailabilityBadge";
+import { useShopAvailability } from "@/hooks/useShopAvailability";
+import { parseDeliveryZones } from "@/lib/shop/delivery-zones";
 import type { Shop } from "@/types";
 import {
   TAG_TONES,
@@ -26,9 +33,15 @@ type ShopCardProps = {
   shop: Shop;
   /** Προαιρετικό: priority φόρτωση για τις πρώτες κάρτες του grid */
   eager?: boolean;
+  /** Milestone 4: πότε διαβάστηκαν τα δεδομένα (Date.now()) — 0 = χωρίς ετικέτα διαθεσιμότητας */
+  observedAt?: number;
 };
 
-export default function ShopCard({ shop, eager = false }: ShopCardProps) {
+export default function ShopCard({ shop, eager = false, observedAt = 0 }: ShopCardProps) {
+  const { availability } = useShopAvailability(shop as unknown as Record<string, unknown>, observedAt);
+  const zonesParsed = parseDeliveryZones(shop.deliveryZones);
+  const hasZones = zonesParsed.kind === "config" && zonesParsed.config.enabled;
+
   return (
     <Link
       href={`/shop/${shop.id}`}
@@ -73,6 +86,10 @@ export default function ShopCard({ shop, eager = false }: ShopCardProps) {
           <Heart className="h-4 w-4" />
         </button>
 
+        {availability && (availability.state !== "open" || availability.scheduled) && (
+          <AvailabilityBadge state={availability.state} className="absolute bottom-3 left-3" />
+        )}
+
         <span className="absolute bottom-3 right-3 flex items-center gap-1 rounded-full bg-white/95 px-2.5 py-1 text-xs font-bold text-gray-900 shadow-md backdrop-blur-sm">
           <Clock className="h-3.5 w-3.5 text-orange-500" />
           {formatEta(shop.etaMinutes)}
@@ -95,7 +112,7 @@ export default function ShopCard({ shop, eager = false }: ShopCardProps) {
 
         <div className="mt-4 flex items-center justify-between border-t border-dashed border-gray-100 pt-4">
           <span className="text-xs font-semibold text-gray-600">
-            Ελάχιστη: {formatPrice(shop.minOrder)}
+            {hasZones ? "Ελάχιστη: ανά ΤΚ" : `Ελάχιστη: ${formatPrice(shop.minOrder)}`}
           </span>
           <span className="text-xs text-gray-400">
             {formatCount(shop.reviews)} κριτικές

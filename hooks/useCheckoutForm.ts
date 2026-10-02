@@ -28,6 +28,7 @@ import {
   validateCheckoutForm,
   validateFormField,
   type CheckoutFormField,
+  type CheckoutFormOptions,
   type CheckoutFormValues,
 } from "@/lib/checkout/validation";
 
@@ -41,7 +42,13 @@ function withoutKeys(
   return next;
 }
 
-export function useCheckoutForm(prefill: PrefillInput) {
+/**
+ * Milestone 4: `options.postalCodeRequired` — το κατάστημα έχει ενεργές ζώνες
+ * ΤΚ. Αλλάζει ζωντανά (ρύθμιση καταστήματος), γι' αυτό οι έλεγχοι
+ * ξαναδημιουργούνται όταν αλλάζει και δεν μένουν «παγωμένοι» στο πρώτο render.
+ */
+export function useCheckoutForm(prefill: PrefillInput, options: CheckoutFormOptions = {}) {
+  const postalCodeRequired = options.postalCodeRequired === true;
   const [state, setState] = useState(createFormState);
   const [errors, setErrors] = useState<CheckoutFieldErrors>({});
 
@@ -58,24 +65,35 @@ export function useCheckoutForm(prefill: PrefillInput) {
   }, []);
 
   /** Έλεγχος πεδίου όταν ο πελάτης φεύγει από αυτό */
-  const blurField = useCallback((field: CheckoutFormField, value: string) => {
-    const error = validateFormField(field, value);
-    setErrors((previous) => {
-      if (error) return previous[field] === error ? previous : { ...previous, [field]: error };
-      return withoutKeys(previous, [field]);
-    });
-  }, []);
+  const blurField = useCallback(
+    (field: CheckoutFormField, value: string) => {
+      const error = validateFormField(field, value, { postalCodeRequired });
+      setErrors((previous) => {
+        if (error) return previous[field] === error ? previous : { ...previous, [field]: error };
+        return withoutKeys(previous, [field]);
+      });
+    },
+    [postalCodeRequired],
+  );
 
   const chooseAddress = useCallback((address: UserAddress) => {
     setState((previous) => chooseSavedAddress(previous, address));
-    setErrors((previous) => withoutKeys(previous, ["street", "city", "instructions"]));
+    setErrors((previous) => withoutKeys(previous, ["street", "city", "postalCode", "instructions"]));
   }, []);
 
   /** Πλήρης έλεγχος πριν την αποστολή — επιστρέφει και εφαρμόζει τα λάθη */
-  const validateAll = useCallback((values: CheckoutFormValues, notes: string) => {
-    const result = validateCheckoutForm(values, notes);
-    setErrors(result);
-    return result;
+  const validateAll = useCallback(
+    (values: CheckoutFormValues, notes: string) => {
+      const result = validateCheckoutForm(values, notes, { postalCodeRequired });
+      setErrors(result);
+      return result;
+    },
+    [postalCodeRequired],
+  );
+
+  /** Milestone 4: λάθος ΤΚ από τον server (εκτός ζώνης κ.λπ.) */
+  const setFieldError = useCallback((field: CheckoutFormField, message: string) => {
+    setErrors((previous) => (previous[field] === message ? previous : { ...previous, [field]: message }));
   }, []);
 
   /** Λάθη που επέστρεψε ο server (validation_failed) */
@@ -98,5 +116,6 @@ export function useCheckoutForm(prefill: PrefillInput) {
     validateAll,
     applyServerErrors,
     clearNotesError,
+    setFieldError,
   };
 }

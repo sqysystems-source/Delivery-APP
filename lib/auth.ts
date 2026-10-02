@@ -52,6 +52,11 @@ export type UserAddress = {
   label: string;
   street: string;
   city?: string;
+  /**
+   * Milestone 4: προαιρετικός 5ψήφιος ΤΚ. Οι παλιές διευθύνσεις δεν τον
+   * έχουν και διαβάζονται κανονικά· διαβάζεται ΜΟΝΟ μέσω normalizePostalCode.
+   */
+  postalCode?: string;
   notes?: string;
   isDefault?: boolean;
 };

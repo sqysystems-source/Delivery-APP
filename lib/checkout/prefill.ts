@@ -16,6 +16,7 @@
 
 import type { SelectedDeliveryAddress } from "@/types";
 import type { UserAddress, UserProfile } from "@/lib/auth";
+import { normalizePostalCode } from "@/lib/shop/postal-code";
 import {
   CHECKOUT_FORM_FIELDS,
   cleanSingleLine,
@@ -54,6 +55,7 @@ export const EMPTY_FORM_VALUES: CheckoutFormValues = {
   phone: "",
   street: "",
   city: "",
+  postalCode: "",
   floor: "",
   doorbell: "",
   instructions: "",
@@ -109,8 +111,19 @@ type AddressCandidate = {
   id: string;
   street: string;
   city: string;
+  /** Milestone 4: "" όταν η αποθηκευμένη διεύθυνση δεν έχει (έγκυρο) ΤΚ */
+  postalCode: string;
   instructions: string;
 };
+
+/**
+ * Milestone 4: ΤΚ ΜΟΝΟ από το ρητό πεδίο `postalCode` της αποθηκευμένης
+ * διεύθυνσης. Ποτέ «μαντεψιά» από οδό, πόλη ή ετικέτα. Παλιές διευθύνσεις
+ * χωρίς ΤΚ (ή με κακόμορφο) διαβάζονται κανονικά — το πεδίο μένει κενό.
+ */
+function savedPostalCode(value: unknown): string {
+  return normalizePostalCode(value) ?? "";
+}
 
 function fromSavedAddress(address: UserAddress): AddressCandidate | null {
   if (!isUsableStreet(address.street)) return null;
@@ -118,6 +131,7 @@ function fromSavedAddress(address: UserAddress): AddressCandidate | null {
     id: address.id,
     street: cleanSingleLine(address.street),
     city: cleanSingleLine(address.city ?? ""),
+    postalCode: savedPostalCode(address.postalCode),
     instructions: typeof address.notes === "string" ? address.notes.trim() : "",
   };
 }
@@ -128,6 +142,7 @@ function fromSelected(address: SelectedDeliveryAddress): AddressCandidate | null
     id: address.sourceId,
     street: cleanSingleLine(address.street),
     city: cleanSingleLine(address.city),
+    postalCode: savedPostalCode(address.postalCode),
     instructions: address.instructions?.trim() ?? "",
   };
 }
@@ -138,7 +153,8 @@ export function pickDefaultAddress(profile: UserProfile): UserAddress | null {
   return usable.find((address) => address.isDefault) ?? usable[0] ?? null;
 }
 
-const ADDRESS_FIELDS: readonly CheckoutFormField[] = ["street", "city", "instructions"];
+/** Η διεύθυνση συμπληρώνεται/προστατεύεται ως ΕΝΟΤΗΤΑ — μαζί και ο ΤΚ (milestone 4) */
+const ADDRESS_FIELDS: readonly CheckoutFormField[] = ["street", "city", "postalCode", "instructions"];
 
 function setPrefilled(
   values: CheckoutFormValues,
@@ -167,6 +183,7 @@ export function chooseSavedAddress(
   const sources = { ...state.sources };
   setPrefilled(values, sources, "street", candidate.street, "prefill-edited");
   setPrefilled(values, sources, "city", candidate.city, "prefill-edited");
+  setPrefilled(values, sources, "postalCode", candidate.postalCode, "prefill-edited");
   setPrefilled(values, sources, "instructions", candidate.instructions, "prefill-edited");
 
   return { ...state, values, sources, appliedAddressId: candidate.id };
@@ -248,6 +265,7 @@ export function reconcilePrefill(
     ensureCopy();
     setPrefilled(values, sources, "street", candidate.street, "prefill");
     setPrefilled(values, sources, "city", candidate.city, "prefill");
+    setPrefilled(values, sources, "postalCode", candidate.postalCode, "prefill");
     setPrefilled(values, sources, "instructions", candidate.instructions, "prefill");
     appliedAddressId = candidate.id;
   }

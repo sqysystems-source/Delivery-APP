@@ -12,6 +12,10 @@
  *      σβήνει προϊόντα ΠΟΥ ΕΧΟΥΝ επιλογές
  *    • οι υπάρχοντες έλεγχοι (τιμή, shopId, ξένο κατάστημα) μένουν
  *    • ο κατάλογος με επιλογές διαβάζεται δημόσια
+ *
+ *  Milestone 4 (στο τέλος του αρχείου): το block shops/{shopId} — ωράριο
+ *  (`openingHours`) και ζώνες ΤΚ (`deliveryZones`) μόνο από τον server,
+ *  παύση (`active`) μόνο boolean, οι υπόλοιπες εγγραφές όπως πριν.
  * ========================================================================== */
 
 import { readFileSync } from "node:fs";
@@ -206,5 +210,125 @@ describe("άμεσες εγγραφές του ιδιοκτήτη σε προϊ�
   it("πρώην ιδιοκτήτης μετά από μεταβίβαση → άρνηση", async () => {
     await seed("shops/shop-a", { name: "Pizza A", ownerUid: "new-owner" });
     await assertFails(updateDoc(item(as.ownerA(), "with-options"), { available: false }));
+  });
+});
+
+/* ==========================================================================
+ *  Milestone 4 — shops/{shopId}: ωράριο, ζώνες ΤΚ και παύση
+ *
+ *  (Στο ΙΔΙΟ αρχείο με τους κανόνες καταλόγου, ώστε η υπάρχουσα ρύθμιση του
+ *  `npm run test:rules` να τα τρέχει χωρίς καμία αλλαγή.)
+ *
+ *    • κανένας browser (ιδιοκτήτης, άλλος ιδιοκτήτης, πελάτης, admin από
+ *      browser) δεν δημιουργεί/αλλάζει/σβήνει `openingHours`/`deliveryZones`
+ *      — τα γράφει μόνο ο server (Admin SDK, εδώ: withSecurityRulesDisabled)
+ *    • ο ιδιοκτήτης ΣΥΝΕΧΙΖΕΙ να βάζει/βγάζει παύση (`active`, μόνο boolean)
+ *      και να αλλάζει όσα άλλαζε πριν, σε καταστήματα που ΗΔΗ έχουν ρυθμίσεις
+ *    • οι υπάρχοντες περιορισμοί (ownerUid, minOrder, deliveryFee…) μένουν
+ * ========================================================================== */
+
+const M4_HOURS = {
+  enabled: true,
+  weekly: {
+    mon: [{ open: "12:00", close: "23:00" }],
+    tue: [],
+    wed: [],
+    thu: [],
+    fri: [{ open: "18:00", close: "02:00" }],
+    sat: [],
+    sun: [],
+  },
+  exceptions: [],
+};
+
+const M4_ZONES = {
+  enabled: true,
+  zones: [
+    {
+      id: "zcenter",
+      name: "Κέντρο",
+      available: true,
+      postalCodes: ["54622"],
+      deliveryFeeCents: 150,
+      minOrderCents: 800,
+      freeDeliveryOverCents: null,
+    },
+  ],
+};
+
+describe("milestone 4: ωράριο/ζώνες ΜΟΝΟ από τον server", () => {
+  beforeEach(async () => {
+    await seed("shops/shop-m4", {
+      name: "Pizza M4",
+      ownerUid: "owner-a",
+      active: true,
+      minOrder: 8,
+      deliveryFee: 1.5,
+      freeDeliveryOver: 20,
+      openingHours: M4_HOURS,
+      deliveryZones: M4_ZONES,
+    });
+    await seed("shops/shop-m4b", { name: "Grill M4", ownerUid: "owner-b", active: false });
+  });
+
+  const shopDoc = (db: Firestore, id = "shop-m4") => doc(db, `shops/${id}`);
+
+  it("ο ιδιοκτήτης ΔΕΝ αλλάζει ωράριο ή ζώνες από τον browser", async () => {
+    await assertFails(updateDoc(shopDoc(as.ownerA()), { openingHours: { ...M4_HOURS, enabled: false } }));
+    await assertFails(
+      updateDoc(shopDoc(as.ownerA()), {
+        deliveryZones: { ...M4_ZONES, zones: [{ ...M4_ZONES.zones[0], deliveryFeeCents: 0 }] },
+      }),
+    );
+  });
+
+  it("ο ιδιοκτήτης ΔΕΝ σβήνει ωράριο/ζώνες (deleteField)", async () => {
+    await assertFails(updateDoc(shopDoc(as.ownerA()), { openingHours: deleteField() }));
+    await assertFails(updateDoc(shopDoc(as.ownerA()), { deliveryZones: deleteField() }));
+  });
+
+  it("ο ιδιοκτήτης ΔΕΝ προσθέτει ωράριο σε κατάστημα που δεν έχει", async () => {
+    await assertFails(updateDoc(shopDoc(as.ownerB(), "shop-m4b"), { openingHours: M4_HOURS }));
+  });
+
+  it("ούτε admin από τον browser (μόνο μέσω server)", async () => {
+    await assertFails(updateDoc(shopDoc(as.admin()), { deliveryZones: M4_ZONES }));
+    await assertFails(
+      setDoc(doc(as.admin(), "shops/shop-m4-new"), { name: "Νέο", ownerUid: "x", openingHours: M4_HOURS }),
+    );
+  });
+
+  it("άλλος ιδιοκτήτης / πελάτης / ανώνυμος: καμία εγγραφή", async () => {
+    await assertFails(updateDoc(shopDoc(as.ownerB()), { openingHours: M4_HOURS }));
+    await assertFails(updateDoc(shopDoc(as.customer()), { deliveryZones: M4_ZONES }));
+    await assertFails(updateDoc(shopDoc(as.nobody()), { active: false }));
+  });
+
+  it("ο ιδιοκτήτης βάζει και βγάζει παύση (boolean) σε κατάστημα ΜΕ ωράριο/ζώνες", async () => {
+    await assertSucceeds(updateDoc(shopDoc(as.ownerA()), { active: false, updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(shopDoc(as.ownerA()), { active: true, updatedAt: serverTimestamp() }));
+  });
+
+  it("η παύση είναι ΜΟΝΟ boolean", async () => {
+    await assertFails(updateDoc(shopDoc(as.ownerA()), { active: "false" }));
+    await assertFails(updateDoc(shopDoc(as.ownerA()), { active: 0 }));
+    await assertFails(updateDoc(shopDoc(as.ownerA()), { active: deleteField() }));
+  });
+
+  it("ο ιδιοκτήτης αλλάζει ακόμη όνομα/διεύθυνση· οι παλιοί περιορισμοί μένουν", async () => {
+    await assertSucceeds(updateDoc(shopDoc(as.ownerA()), { name: "Pizza M4+", address: "Ερμού 1" }));
+    await assertFails(updateDoc(shopDoc(as.ownerA()), { deliveryFee: 0 }));
+    await assertFails(updateDoc(shopDoc(as.ownerA()), { minOrder: 0 }));
+    await assertFails(updateDoc(shopDoc(as.ownerA()), { ownerUid: "owner-b" }));
+    await assertFails(updateDoc(shopDoc(as.ownerB()), { active: false }));
+  });
+
+  it("admin από browser αλλάζει άλλα πεδία και δημιουργεί καταστήματα (όπως πριν)", async () => {
+    await assertSucceeds(updateDoc(shopDoc(as.admin()), { rating: 4.9 }));
+    await assertSucceeds(setDoc(doc(as.admin(), "shops/shop-m4-new"), { name: "Νέο", ownerUid: "x" }));
+  });
+
+  it("δημόσια ανάγνωση καταστήματος με ωράριο/ζώνες (βιτρίνα, checkout)", async () => {
+    await assertSucceeds(getDoc(shopDoc(as.nobody())));
   });
 });

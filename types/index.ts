@@ -65,7 +65,107 @@ export type Shop = {
   gradient: string;
   address: string;
   tag?: ShopTag;
+  /**
+   * Χειροκίνητη παύση παραγγελιών: `false` = «Προσωρινά δεν δεχόμαστε
+   * παραγγελίες». Απόν/true = καμία παύση (συμπεριφορά πριν το milestone 4).
+   * Διαβάζεται ΜΟΝΟ μέσω evaluateShopAvailability (lib/shop/availability.ts).
+   */
+  active?: unknown;
+  /**
+   * Milestone 4: ωράριο λειτουργίας (OpeningHoursConfig). Γράφεται ΜΟΝΟ από
+   * τον server (POST /api/admin/shop-settings). Ακατέργαστο από τη βάση —
+   * διαβάζεται πάντα μέσω parseOpeningHours, ποτέ «ως έχει».
+   */
+  openingHours?: unknown;
+  /**
+   * Milestone 4: ζώνες παράδοσης ανά ΤΚ (DeliveryZonesConfig). Γράφεται ΜΟΝΟ
+   * από τον server· διαβάζεται πάντα μέσω parseDeliveryZones.
+   */
+  deliveryZones?: unknown;
 };
+
+/* --------------------------------------------------------------------------
+ *  Ωράριο λειτουργίας (milestone 4) — δες lib/shop/opening-hours.ts
+ *
+ *  Ζώνη ώρας: ΠΑΝΤΑ Europe/Athens. Άνοιγμα ΣΥΜΠΕΡΙΛΑΜΒΑΝΕΤΑΙ, κλείσιμο ΟΧΙ.
+ *  close < open = βραδινή βάρδια που συνεχίζει την επόμενη μέρα.
+ * -------------------------------------------------------------------------- */
+
+export type WeekdayKey = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+
+/** "HH:MM" — το close μπορεί να είναι "24:00" ή "00:00" (= μεσάνυχτα) */
+export type OpeningInterval = {
+  open: string;
+  close: string;
+};
+
+/** Εξαίρεση ημερομηνίας: ορίζει ΟΛΟ το ημερολογιακό 24ωρο της `date` */
+export type OpeningHoursException = {
+  /** "YYYY-MM-DD" (ημερομηνία Αθήνας) */
+  date: string;
+  closed: boolean;
+  /** Κενό όταν closed = true */
+  intervals: OpeningInterval[];
+  /** Προαιρετική σημείωση, π.χ. «Χριστούγεννα» */
+  label?: string;
+};
+
+export type OpeningHoursConfig = {
+  /** false = το ωράριο αποθηκεύεται αλλά δεν εφαρμόζεται (ανοιχτό όπως πριν) */
+  enabled: boolean;
+  weekly: Record<WeekdayKey, OpeningInterval[]>;
+  exceptions: OpeningHoursException[];
+};
+
+/* --------------------------------------------------------------------------
+ *  Ζώνες παράδοσης ανά ΤΚ (milestone 4) — δες lib/shop/delivery-zones.ts
+ *
+ *  Η συμμετοχή του ΤΚ σε ζώνη είναι ΜΟΝΟ έλεγχος περιοχής εξυπηρέτησης·
+ *  δεν επαληθεύει οδό, θέση πελάτη ή απόσταση.
+ * -------------------------------------------------------------------------- */
+
+export type DeliveryZone = {
+  /** Σταθερό id — δεν αλλάζει σε μετονομασία */
+  id: string;
+  name: string;
+  available: boolean;
+  /** 5ψήφιοι ΤΚ ως ΚΕΙΜΕΝΟ (κρατούν τα αρχικά μηδενικά) */
+  postalCodes: string[];
+  deliveryFeeCents: number;
+  /** Ελάχιστο υποσύνολο προϊόντων (μαζί με τις επιλογές) */
+  minOrderCents: number;
+  /** null = χωρίς δωρεάν μεταφορικά */
+  freeDeliveryOverCents: number | null;
+};
+
+export type DeliveryZonesConfig = {
+  /** false = ισχύουν τα γενικά μεταφορικά/ελάχιστη του καταστήματος */
+  enabled: boolean;
+  zones: DeliveryZone[];
+};
+
+/**
+ * Στιγμιότυπο όρων παράδοσης — στην απάντηση του server και, ΑΜΕΤΑΒΛΗΤΟ, στην
+ * παραγγελία (`deliveryTerms`). Οι παλαιότερες παραγγελίες δεν το έχουν.
+ */
+export type DeliveryTermsSnapshot =
+  | {
+      mode: "shop_default";
+      /** Ο ΤΚ που έδωσε ο πελάτης (αν έδωσε) — δεν ελέγχθηκε σε ζώνη */
+      postalCode: string | null;
+      deliveryFeeCents: number;
+      minOrderCents: number;
+      freeDeliveryOverCents: number | null;
+    }
+  | {
+      mode: "zone";
+      zoneId: string;
+      zoneName: string;
+      postalCode: string;
+      deliveryFeeCents: number;
+      minOrderCents: number;
+      freeDeliveryOverCents: number | null;
+    };
 
 /* --------------------------------------------------------------------------
  *  Μενού
@@ -197,6 +297,12 @@ export type CartShopRef = {
   minOrder: number;
   deliveryFee: number;
   freeDeliveryOver: number | null;
+  /**
+   * Milestone 4: το κατάστημα χρεώνει ανά ΤΚ (ζώνες) — τα γενικά μεταφορικά/
+   * ελάχιστη ΔΕΝ ισχύουν· οι πραγματικοί όροι φαίνονται στο ταμείο. Απόν =
+   * όπως πριν.
+   */
+  zonedDelivery?: true;
 };
 
 /** Ένα καλάθι ανά κατάστημα κάθε φορά */
@@ -223,6 +329,10 @@ export type CartTotals = {
   totalCents: number;
   minOrderCents: number;
   missingForMinOrderCents: number;
+  /** Milestone 4: όριο δωρεάν μεταφορικών που εφαρμόστηκε (null = κανένα) */
+  freeDeliveryOverCents: number | null;
+  /** Πόσα λείπουν για δωρεάν μεταφορικά (null όταν δεν εφαρμόζεται) */
+  missingForFreeDeliveryCents: number | null;
   /** Το σύνολο ξεπερνά το ανώτατο όριο παραγγελίας (500€) */
   exceedsMaxOrder: boolean;
   canCheckout: boolean;
@@ -240,6 +350,8 @@ export type SelectedDeliveryAddress = {
   label: string;
   street: string;
   city: string;
+  /** Milestone 4: 5ψήφιος ΤΚ, μόνο αν υπάρχει ρητά στην αποθηκευμένη διεύθυνση */
+  postalCode?: string;
   instructions?: string;
 };
 
@@ -262,6 +374,12 @@ export type CheckoutCustomer = {
 export type CheckoutDelivery = {
   street: string;
   city: string;
+  /**
+   * Milestone 4: 5ψήφιος ΤΚ σε κανονική μορφή ("546 22" → "54622").
+   * Υποχρεωτικός μόνο όταν το κατάστημα έχει ενεργές ζώνες ΤΚ. Οι παλαιότερες
+   * παραγγελίες/αιτήματα δεν τον έχουν.
+   */
+  postalCode?: string;
   floor?: string;
   doorbell?: string;
   instructions?: string;
@@ -292,6 +410,12 @@ export type CheckoutRequest = {
    * δημιουργείται παραγγελία. Δεν χρησιμοποιείται ποτέ ως τιμή.
    */
   expectedTotalCents: number;
+  /**
+   * Milestone 4: η ζώνη παράδοσης που ΕΙΔΕ ο πελάτης (μόνο σε καταστήματα με
+   * ζώνες ΤΚ). Μόνο για σύγκριση — ο server βρίσκει τη ζώνη από τον ΤΚ. Αν
+   * διαφέρει, καμία παραγγελία: ο πελάτης επιβεβαιώνει ξανά.
+   */
+  expectedDeliveryZoneId?: string;
 };
 
 /* --------------------------------------------------------------------------
@@ -334,7 +458,13 @@ export type CheckoutQuote = {
   subtotalCents: number;
   deliveryFeeCents: number;
   totalCents: number;
+  /** Οι όροι που εφαρμόστηκαν — της ζώνης, όταν το κατάστημα έχει ζώνες ΤΚ */
   shopTerms: CheckoutShopTerms;
+  /**
+   * Milestone 4: ποιοι όροι παράδοσης εφαρμόστηκαν και γιατί. Απόν σε
+   * αποθηκευμένες απαντήσεις από πριν το milestone 4 (επαναλήψεις/ανάκτηση).
+   */
+  delivery?: DeliveryTermsSnapshot;
 };
 
 /** Επιτυχής καταχώρηση — ίδια απάντηση και σε κάθε επανάληψη του ίδιου κλειδιού */
@@ -359,6 +489,14 @@ export type CheckoutErrorCode =
   | "rate_limited"
   | "shop_not_found"
   | "shop_closed"
+  /** Milestone 4: το κατάστημα έχει ζώνες ΤΚ και δεν δόθηκε ΤΚ */
+  | "postal_code_required"
+  /** Milestone 4: ο ΤΚ δεν ανήκει σε καμία ζώνη του καταστήματος */
+  | "delivery_zone_unsupported"
+  /** Milestone 4: η ζώνη του ΤΚ είναι προσωρινά απενεργοποιημένη */
+  | "delivery_zone_unavailable"
+  /** Milestone 4: ο ΤΚ ανήκει τώρα σε άλλη ζώνη (ή οι ζώνες άλλαξαν) — νέα επιβεβαίωση */
+  | "delivery_zone_changed"
   | "item_not_found"
   | "item_unavailable"
   /** Milestone 3: επιλογή που δεν είναι πια διαθέσιμη — ο πελάτης επεξεργάζεται τη γραμμή */
@@ -387,6 +525,7 @@ export type CheckoutFieldName =
   | "phone"
   | "street"
   | "city"
+  | "postalCode"
   | "floor"
   | "doorbell"
   | "instructions"
@@ -395,7 +534,8 @@ export type CheckoutFieldName =
   | "shopId"
   | "paymentMethod"
   | "idempotencyKey"
-  | "expectedTotalCents";
+  | "expectedTotalCents"
+  | "expectedDeliveryZoneId";
 
 export type CheckoutFieldErrors = Partial<Record<CheckoutFieldName, string>>;
 
@@ -413,6 +553,15 @@ export type CheckoutErrorBody = {
   lineKey?: string;
   /** idempotency_key_reused: η παραγγελία που ήδη υπάρχει με αυτό το κλειδί */
   existingOrder?: { orderId: string; code: string };
+  /** Milestone 4 — shop_closed / shop_config_invalid: η διαθεσιμότητα όπως την είδε ο server */
+  availability?: CheckoutAvailabilityInfo;
+};
+
+/** Milestone 4: διαθεσιμότητα καταστήματος στη στιγμή του ελέγχου του server */
+export type CheckoutAvailabilityInfo = {
+  state: "closed" | "paused" | "unavailable";
+  /** ISO 8601 — μόνο όταν το επόμενο άνοιγμα υπολογίζεται αξιόπιστα */
+  nextOpenAt: string | null;
 };
 
 export type CheckoutResponseBody = CheckoutSuccess | CheckoutErrorBody;
@@ -496,6 +645,8 @@ export type StoredOrder = {
   delivery?: CheckoutDelivery;
   paymentMethod?: PaymentMethod;
   notes?: string;
+  /** Milestone 4: αμετάβλητοι όροι παράδοσης (ζώνη, ΤΚ, μεταφορικά, όρια) */
+  deliveryTerms?: DeliveryTermsSnapshot;
   etaMinutes?: [number, number] | null;
   source?: "web";
   schemaVersion?: number;

@@ -38,6 +38,19 @@
  *    γραμμή επισημαίνεται και ο πελάτης την επεξεργάζεται (EditCartLineDialog)
  *    ή την αφαιρεί — οι επιλογές του δεν πετιούνται ποτέ σιωπηλά.
  *  • Όλα τα στιγμιότυπα/αφαιρέσεις γίνονται ανά ΓΡΑΜΜΗ (itemId + επιλογές).
+ *
+ *  ── ΩΡΑΡΙΟ ΚΑΙ ΖΩΝΕΣ ΤΚ (milestone 4) ───────────────────────────────────
+ *  • Ένας listener στο κατάστημα (useLiveShop) + χρονόμετρο για το επόμενο
+ *    όριο ωραρίου (useShopAvailability). Κλειστό/σε παύση → η υποβολή
+ *    κλειδώνει με ελληνική εξήγηση· το καλάθι μένει ΑΘΙΚΤΟ.
+ *  • Ζώνες ΤΚ ενεργές → ο ΤΚ είναι υποχρεωτικός· σύνολα, ελάχιστη και δωρεάν
+ *    μεταφορικά υπολογίζονται με τους όρους της ζώνης του. Εκτός περιοχής ή
+ *    ανενεργή ζώνη → καθαρό μήνυμα, καμία υποβολή.
+ *  • Το αίτημα στέλνει ΤΚ + τη ζώνη που είδε ο πελάτης (μόνο για σύγκριση).
+ *    Ο server αποφασίζει· αν άλλαξε ζώνη/ποσό → καμία παραγγελία, νέα ρητή
+ *    επιβεβαίωση με τους νέους όρους (ποτέ σιωπηλή αλλαγή ζώνης/τιμής).
+ *  • Αν ο listener αποτύχει, η σελίδα δεν μαντεύει: η υποβολή επιτρέπεται και
+ *    ο server κάνει τον έλεγχο.
  * ========================================================================== */
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
@@ -61,10 +74,27 @@ import CheckoutField from "@/components/checkout/CheckoutField";
 import CheckoutSuccess from "@/components/checkout/CheckoutSuccess";
 import CheckoutSummary, { type PriceChangeNotice } from "@/components/checkout/CheckoutSummary";
 import EditCartLineDialog from "@/components/options/EditCartLineDialog";
+import AvailabilityBadge from "@/components/shop/AvailabilityBadge";
 import { useAuth } from "@/context/AuthContext";
 import { useCart } from "@/context/CartContext";
 import { useCheckoutForm } from "@/hooks/useCheckoutForm";
-import { snapshotCart, toRequestLines, type SubmittedCartSnapshot } from "@/lib/checkout/cart";
+import { useLiveShop } from "@/hooks/useLiveShop";
+import { useShopAvailability } from "@/hooks/useShopAvailability";
+import {
+  computeCartTotals,
+  snapshotCart,
+  toRequestLines,
+  type SubmittedCartSnapshot,
+} from "@/lib/checkout/cart";
+import { describeOrderBlock } from "@/lib/shop/availability";
+import {
+  describeDeliveryProblem,
+  formatZoneTerms,
+  parseDeliveryZones,
+  resolveDeliveryTerms,
+  type DeliveryTermsResolution,
+} from "@/lib/shop/delivery-zones";
+import { POSTAL_CODE_INPUT_MAX, formatPostalCode, normalizePostalCode } from "@/lib/shop/postal-code";
 import {
   clearCheckoutAttempt,
   clearCheckoutAttemptsExcept,
@@ -103,6 +133,7 @@ import type {
   CheckoutQuote,
   CheckoutRequest,
   CheckoutSuccess as CheckoutSuccessResult,
+  DeliveryTermsSnapshot,
 } from "@/types";
 
 /** Αποτέλεσμα ελέγχου μιας αποθηκευμένης προσπάθειας (κλειδωμένο σε uid+κλειδί) */
@@ -162,6 +193,46 @@ function snapshotFromResult(result: CheckoutSuccessResult): SubmittedCartSnapsho
 
 /** Κωδικοί σφάλματος που ζητούν επεξεργασία ΜΙΑΣ γραμμής (milestone 3) */
 const OPTION_ERROR_CODES = new Set(["option_unavailable", "options_changed"]);
+
+/** Milestone 4: σφάλματα που αφορούν τον ΤΚ — εστίαση στο πεδίο */
+const POSTAL_ERROR_CODES = new Set([
+  "postal_code_required",
+  "delivery_zone_unsupported",
+  "delivery_zone_unavailable",
+]);
+
+type ZoneSnapshot = Extract<DeliveryTermsSnapshot, { mode: "zone" }>;
+
+/**
+ * Milestone 4 — όροι παράδοσης όπως τους βλέπει ΤΩΡΑ το checkout:
+ *   default — γενικοί όροι του καταστήματος (όπως πριν)
+ *   zone    — όροι της ζώνης του ΤΚ
+ *   problem — ΤΚ κενός/εκτός περιοχής/ανενεργή ζώνη/κακόμορφη ρύθμιση
+ */
+type CheckoutDeliveryState =
+  | { kind: "default" }
+  | { kind: "zone"; snapshot: ZoneSnapshot }
+  | {
+      kind: "problem";
+      reason: Exclude<DeliveryTermsResolution, { ok: true }>["reason"];
+      message: string;
+    };
+
+/** Όροι που επέστρεψε ο server (μετά από αλλαγή) — ισχύουν μέχρι το επόμενο snapshot */
+type DeliveryOverride = {
+  postalCode: string | null;
+  version: number;
+  snapshot: DeliveryTermsSnapshot;
+};
+
+const DELIVERY_PENDING_TEXT: Record<Exclude<DeliveryTermsResolution, { ok: true }>["reason"], string> = {
+  postal_code_required: "Συμπλήρωσε ΤΚ",
+  postal_code_invalid: "Έλεγξε τον ΤΚ",
+  unsupported: "Εκτός περιοχής",
+  zone_unavailable: "Μη διαθέσιμη περιοχή",
+  zones_config_invalid: "Μη διαθέσιμα",
+  shop_terms_invalid: "Μη διαθέσιμα",
+};
 
 /** Όνομα + σύντομη περιγραφή επιλογών για ειδοποιήσεις */
 function lineLabel(line: { name: string; options?: CartLine["options"] }): string {
@@ -225,12 +296,36 @@ export default function CheckoutClient() {
   const { user, profile, isAuthenticated, openLogin, loading: authLoading } = useAuth();
   const uid = user?.uid ?? null;
 
-  const form = useCheckoutForm({
-    uid: user?.uid ?? null,
-    isAnonymous: user?.isAnonymous ?? false,
-    profile,
-    selectedAddress: deliveryAddress,
-  });
+  /* ---------------- Milestone 4: ζωντανή ρύθμιση καταστήματος -------------- */
+  const live = useLiveShop(hydrated ? (cart.shop?.id ?? null) : null);
+  const liveData = live.status === "ready" ? live.data : null;
+  const { availability, now } = useShopAvailability(liveData, live.receivedAt);
+  const zonesParsed = useMemo(
+    () => (liveData ? parseDeliveryZones(liveData.deliveryZones) : null),
+    [liveData],
+  );
+  /** unknown: ακόμη δεν ξέρουμε · none: χωρίς ζώνες · zones · invalid */
+  const zonesMode: "unknown" | "none" | "zones" | "invalid" =
+    live.status === "loading"
+      ? "unknown"
+      : !zonesParsed
+        ? "none"
+        : zonesParsed.kind === "invalid"
+          ? "invalid"
+          : zonesParsed.kind === "config" && zonesParsed.config.enabled
+            ? "zones"
+            : "none";
+  const postalCodeRequired = zonesMode === "zones" || zonesMode === "invalid";
+
+  const form = useCheckoutForm(
+    {
+      uid: user?.uid ?? null,
+      isAnonymous: user?.isAnonymous ?? false,
+      profile,
+      selectedAddress: deliveryAddress,
+    },
+    { postalCodeRequired },
+  );
 
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState<CheckoutSuccessResult | null>(null);
@@ -246,6 +341,69 @@ export default function CheckoutClient() {
   /** Milestone 3: γραμμή υπό επεξεργασία επιλογών */
   const [editingLine, setEditingLine] = useState<CartLine | null>(null);
   const [lineAnnouncement, setLineAnnouncement] = useState("");
+  /** Milestone 4: όροι παράδοσης από απάντηση του server (price/zone change) */
+  const [deliveryOverride, setDeliveryOverride] = useState<DeliveryOverride | null>(null);
+
+  /* ------------------ Milestone 4: όροι παράδοσης τώρα ------------------- */
+  const postalInput = cleanSingleLine(form.values.postalCode);
+  const normalizedPostal = normalizePostalCode(postalInput);
+  const delivery = useMemo<CheckoutDeliveryState>(() => {
+    if (zonesMode === "invalid") {
+      return {
+        kind: "problem",
+        reason: "zones_config_invalid",
+        message: describeDeliveryProblem("zones_config_invalid", null),
+      };
+    }
+    /* Ο server μόλις μας είπε τους τρέχοντες όρους για ΑΥΤΟΝ τον ΤΚ, και ο
+     * listener δεν έχει φέρει ακόμη νεότερη ρύθμιση */
+    if (
+      deliveryOverride &&
+      deliveryOverride.version === live.version &&
+      deliveryOverride.postalCode === normalizedPostal
+    ) {
+      return deliveryOverride.snapshot.mode === "zone"
+        ? { kind: "zone", snapshot: deliveryOverride.snapshot }
+        : { kind: "default" };
+    }
+    if (zonesMode !== "zones" || !liveData) return { kind: "default" };
+
+    const resolution = resolveDeliveryTerms(liveData, postalInput || null);
+    if (resolution.ok) {
+      return resolution.snapshot.mode === "zone"
+        ? { kind: "zone", snapshot: resolution.snapshot }
+        : { kind: "default" };
+    }
+    return {
+      kind: "problem",
+      reason: resolution.reason,
+      message: describeDeliveryProblem(resolution.reason, normalizedPostal),
+    };
+  }, [zonesMode, deliveryOverride, live.version, normalizedPostal, liveData, postalInput]);
+
+  /** Σύνολα με τους όρους που ισχύουν (της ζώνης, αν υπάρχει) */
+  const checkoutTotals = useMemo(
+    () =>
+      delivery.kind === "zone"
+        ? computeCartTotals(cart, {
+            deliveryFeeCents: delivery.snapshot.deliveryFeeCents,
+            minOrderCents: delivery.snapshot.minOrderCents,
+            freeDeliveryOverCents: delivery.snapshot.freeDeliveryOverCents,
+          })
+        : totals,
+    [delivery, cart, totals],
+  );
+
+  /** Διαθεσιμότητα: μόνο όταν ΞΕΡΟΥΜΕ ότι δεν δέχεται (αποτυχία listener → αποφασίζει ο server) */
+  const checkingShop = hydrated && cart.lines.length > 0 && live.status === "loading";
+  const orderBlockMessage =
+    live.status === "missing"
+      ? "Το κατάστημα δεν είναι πια διαθέσιμο. Το καλάθι σου μένει ως έχει."
+      : live.status === "ready" && availability && availability.state !== "open"
+        ? describeOrderBlock(availability, now)
+        : zonesMode === "invalid"
+          ? `${describeDeliveryProblem("zones_config_invalid", null)} Το καλάθι σου μένει ως έχει.`
+          : null;
 
   const submittingRef = useRef(false);
   const keyRef = useRef<IdempotencyKeyState | null>(null);
@@ -355,7 +513,7 @@ export default function CheckoutClient() {
 
   /* Η ειδοποίηση τιμών ισχύει όσο το καλάθι δείχνει το νέο σύνολο */
   const activePriceNotice =
-    priceNotice && priceNotice.newTotalCents === totals.totalCents ? priceNotice : null;
+    priceNotice && priceNotice.newTotalCents === checkoutTotals.totalCents ? priceNotice : null;
 
   /* ------------------------------ Υποβολή ------------------------------ */
   const handleSubmit = async (event?: FormEvent<HTMLFormElement>) => {
@@ -365,6 +523,8 @@ export default function CheckoutClient() {
     if (submittingRef.current) return;
     // Ανεπίλυτη προσπάθεια από πριν την ανανέωση: πρώτα ο έλεγχος
     if (recoveryPhase !== "idle") return;
+    // Milestone 4: κλειστό/σε παύση/ακόμη άγνωστο → καμία αποστολή, το καλάθι μένει
+    if (checkingShop || orderBlockMessage) return;
 
     const snapshot = snapshotCart(cart);
     if (!hydrated || !snapshot) return;
@@ -380,7 +540,13 @@ export default function CheckoutClient() {
       setFocusRequest({ kind: "field", id: FIELD_ID(firstInvalid) });
       return;
     }
-    if (totals.missingForMinOrderCents > 0 || totals.exceedsMaxOrder) return;
+    /* Milestone 4: ΤΚ εκτός περιοχής / ανενεργή ζώνη → καθαρό μήνυμα στο πεδίο */
+    if (delivery.kind === "problem") {
+      form.setFieldError("postalCode", delivery.message);
+      setFocusRequest({ kind: "field", id: FIELD_ID("postalCode") });
+      return;
+    }
+    if (checkoutTotals.missingForMinOrderCents > 0 || checkoutTotals.exceedsMaxOrder) return;
 
     /* 2. Το αίτημα — ΜΟΝΟ στοιχεία πελάτη, ids και ποσότητες */
     const notes = cleanMultiLine(orderNotes);
@@ -395,13 +561,20 @@ export default function CheckoutClient() {
       paymentMethod: "cash_on_delivery",
       lines: toRequestLines(snapshot.lines),
       // Το σύνολο που βλέπει ο πελάτης — ΜΟΝΟ για σύγκριση στον server
-      expectedTotalCents: totals.totalCents,
+      expectedTotalCents: checkoutTotals.totalCents,
+      // Milestone 4: η ζώνη που βλέπει ο πελάτης — ΜΟΝΟ για σύγκριση
+      ...(delivery.kind === "zone" ? { expectedDeliveryZoneId: delivery.snapshot.zoneId } : {}),
     };
 
     /* 3. Κλειδί: ίδιο για ίδιο αίτημα, νέο για οτιδήποτε άλλαξε */
     const keyState = resolveKeyForSubmission(keyRef.current, requestFingerprint(request));
 
-    const submittedDeliveryFee = totals.deliveryFee;
+    const submittedDeliveryFee = checkoutTotals.deliveryFee;
+    const submittedZone = {
+      name: delivery.kind === "zone" ? delivery.snapshot.zoneName : null,
+      postalCode: normalizedPostal,
+      version: live.version,
+    };
     submittingRef.current = true;
     setSubmitting(true);
 
@@ -497,7 +670,7 @@ export default function CheckoutClient() {
               uncertain: true,
             });
 
-      handleSubmitError(error, snapshot, submittedDeliveryFee, request.expectedTotalCents);
+      handleSubmitError(error, snapshot, submittedDeliveryFee, request.expectedTotalCents, submittedZone);
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
@@ -524,12 +697,39 @@ export default function CheckoutClient() {
     snapshot: SubmittedCartSnapshot,
     previousDeliveryFee: number,
     previousTotalCents: number,
+    previousZone: { name: string | null; postalCode: string | null; version: number },
   ) => {
-    /* Αλλαγή τιμών: νέα σύνοψη, ΚΑΜΙΑ παραγγελία, χρειάζεται νέο κλικ */
-    if (error.code === "price_changed" && error.quote) {
-      setPriceNotice(buildPriceNotice(snapshot, previousDeliveryFee, previousTotalCents, error.quote));
+    /* Milestone 4: ο server έστειλε τους ΤΡΕΧΟΝΤΕΣ όρους παράδοσης — ισχύουν
+     * για αυτόν τον ΤΚ μέχρι να φέρει ο listener νεότερη ρύθμιση */
+    const quoteDelivery = error.quote?.delivery;
+    if (quoteDelivery) {
+      setDeliveryOverride({
+        postalCode: previousZone.postalCode,
+        version: previousZone.version,
+        snapshot: quoteDelivery,
+      });
+    }
+
+    /* Αλλαγή τιμών ή ζώνης: νέα σύνοψη, ΚΑΜΙΑ παραγγελία, χρειάζεται νέο κλικ */
+    if ((error.code === "price_changed" || error.code === "delivery_zone_changed") && error.quote) {
+      const notice = buildPriceNotice(snapshot, previousDeliveryFee, previousTotalCents, error.quote);
+      if (quoteDelivery) {
+        const nextZone = quoteDelivery.mode === "zone" ? quoteDelivery.zoneName : null;
+        if (nextZone !== previousZone.name || error.code === "delivery_zone_changed") {
+          notice.zone = { before: previousZone.name, after: nextZone };
+        }
+      }
+      setPriceNotice(notice);
       applyQuote(error.quote);
       setFocusRequest({ kind: "price" });
+      return;
+    }
+
+    /* Milestone 4: ΤΚ εκτός περιοχής / ανενεργή ζώνη / λείπει → στο πεδίο */
+    if (POSTAL_ERROR_CODES.has(error.code)) {
+      setSubmitError(error);
+      form.setFieldError("postalCode", error.fieldErrors?.postalCode ?? error.message);
+      setFocusRequest({ kind: "field", id: FIELD_ID("postalCode") });
       return;
     }
 
@@ -614,11 +814,21 @@ export default function CheckoutClient() {
   /* ================================ ΦΟΡΜΑ ================================ */
 
   const { values, errors } = form;
+  /* Milestone 4: όσο δεν έχει βρεθεί ζώνη, η ελάχιστη/το σύνολο δεν είναι
+   * γνωστά — το κουμπί μένει ενεργό ώστε το πάτημα να δείξει το μήνυμα ΤΚ */
+  const deliveryPending =
+    delivery.kind === "problem" ? DELIVERY_PENDING_TEXT[delivery.reason] : null;
   const canSubmit =
     !submitting &&
     recoveryPhase === "idle" &&
-    totals.missingForMinOrderCents === 0 &&
-    !totals.exceedsMaxOrder;
+    !checkingShop &&
+    !orderBlockMessage &&
+    (deliveryPending !== null ||
+      (checkoutTotals.missingForMinOrderCents === 0 && !checkoutTotals.exceedsMaxOrder));
+  const zoneLabel =
+    delivery.kind === "zone"
+      ? `Ζώνη «${delivery.snapshot.zoneName}» · ΤΚ ${formatPostalCode(delivery.snapshot.postalCode)}`
+      : null;
   /* Milestone 3: σφάλμα επιλογών → η ΣΥΓΚΕΚΡΙΜΕΝΗ γραμμή (όχι όλο το προϊόν) */
   const errorLine =
     submitError && OPTION_ERROR_CODES.has(submitError.code) && submitError.lineKey
@@ -749,6 +959,23 @@ export default function CheckoutClient() {
           </div>
         )}
 
+        {/* ---------- Milestone 4: το κατάστημα δεν δέχεται παραγγελίες ---------- */}
+        {orderBlockMessage && (
+          <div
+            id="checkout-availability"
+            role="status"
+            className="mt-5 flex items-start gap-3 rounded-3xl border border-amber-300 bg-amber-50 p-5 text-sm text-amber-900"
+          >
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <div className="space-y-2">
+              {availability && live.status === "ready" && availability.state !== "open" && (
+                <AvailabilityBadge state={availability.state} />
+              )}
+              <p className="font-semibold leading-relaxed">{orderBlockMessage}</p>
+            </div>
+          </div>
+        )}
+
         <form
           ref={formRef}
           noValidate
@@ -868,6 +1095,41 @@ export default function CheckoutClient() {
                   placeholder="π.χ. Τρίκαλα"
                   className="sm:col-span-2"
                 />
+                {/* Milestone 4: υποχρεωτικός μόνο σε καταστήματα με ζώνες ΤΚ */}
+                <CheckoutField
+                  {...fieldProps("postalCode")}
+                  label="Ταχυδρομικός κώδικας"
+                  required={postalCodeRequired}
+                  inputMode="numeric"
+                  autoComplete="postal-code"
+                  maxLength={POSTAL_CODE_INPUT_MAX}
+                  placeholder="π.χ. 546 22"
+                  hint={
+                    postalCodeRequired
+                      ? "Το κατάστημα εξυπηρετεί συγκεκριμένους ΤΚ. Ελέγχουμε μόνο τον ΤΚ — όχι την οδό ή την απόσταση."
+                      : undefined
+                  }
+                  className="sm:col-span-2"
+                />
+                {zonesMode === "zones" && postalInput && !errors.postalCode && (
+                  <p
+                    id="checkout-zone-status"
+                    role="status"
+                    aria-live="polite"
+                    className={cn(
+                      "rounded-2xl px-3.5 py-2.5 text-xs font-semibold sm:col-span-2",
+                      delivery.kind === "zone"
+                        ? "bg-emerald-50 text-emerald-800"
+                        : "bg-amber-50 text-amber-900",
+                    )}
+                  >
+                    {delivery.kind === "zone"
+                      ? `Εξυπηρετείται — ζώνη «${delivery.snapshot.zoneName}»: ${formatZoneTerms(delivery.snapshot)}.`
+                      : delivery.kind === "problem"
+                        ? delivery.message
+                        : ""}
+                  </p>
+                )}
                 <CheckoutField
                   {...fieldProps("floor")}
                   label="Όροφος"
@@ -953,7 +1215,9 @@ export default function CheckoutClient() {
           <div className="lg:sticky lg:top-24">
             <CheckoutSummary
               cart={cart}
-              totals={totals}
+              totals={checkoutTotals}
+              deliveryPending={deliveryPending}
+              zoneLabel={zoneLabel}
               locked={submitting}
               onIncrease={increase}
               onDecrease={decrease}
@@ -1062,11 +1326,13 @@ export default function CheckoutClient() {
                 type="submit"
                 disabled={!canSubmit}
                 aria-describedby={
-                  totals.missingForMinOrderCents > 0
-                    ? "checkout-min-order"
-                    : totals.exceedsMaxOrder
-                      ? "checkout-max-order"
-                      : undefined
+                  orderBlockMessage
+                    ? "checkout-availability"
+                    : !deliveryPending && checkoutTotals.missingForMinOrderCents > 0
+                      ? "checkout-min-order"
+                      : !deliveryPending && checkoutTotals.exceedsMaxOrder
+                        ? "checkout-max-order"
+                        : undefined
                 }
                 className="flex w-full items-center justify-center gap-2 rounded-full bg-orange-500 px-6 py-4 text-base font-bold text-white shadow-lg shadow-orange-500/30 transition-all duration-300 hover:scale-[1.02] hover:bg-orange-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 active:scale-95 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:shadow-none disabled:hover:scale-100"
               >
@@ -1075,12 +1341,29 @@ export default function CheckoutClient() {
                     <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
                     Αποστολή…
                   </>
+                ) : checkingShop ? (
+                  <>
+                    <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+                    Έλεγχος καταστήματος…
+                  </>
+                ) : orderBlockMessage ? (
+                  <>Δεν δέχεται παραγγελίες τώρα</>
+                ) : deliveryPending ? (
+                  <>Ολοκλήρωση παραγγελίας</>
                 ) : activePriceNotice ? (
-                  <>Επιβεβαίωση νέου συνόλου · {formatPrice(centsToEuros(totals.totalCents))}</>
+                  <>Επιβεβαίωση νέου συνόλου · {formatPrice(centsToEuros(checkoutTotals.totalCents))}</>
                 ) : (
-                  <>Ολοκλήρωση παραγγελίας · {formatPrice(centsToEuros(totals.totalCents))}</>
+                  <>Ολοκλήρωση παραγγελίας · {formatPrice(centsToEuros(checkoutTotals.totalCents))}</>
                 )}
               </button>
+
+              {live.status === "error" && (
+                <p className="flex items-start gap-2 text-xs leading-relaxed text-gray-500">
+                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gray-400" aria-hidden="true" />
+                  Δεν μπορέσαμε να ελέγξουμε ζωντανά το ωράριο και τις περιοχές του καταστήματος. Ο
+                  έλεγχος θα γίνει κατά την αποστολή.
+                </p>
+              )}
 
               <p className="flex items-start gap-2 text-xs leading-relaxed text-gray-500">
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" aria-hidden="true" />

@@ -7,6 +7,8 @@
  *    • schemaVersion 2+: δομημένα customer / delivery / paymentMethod
  *    • παλαιότερες: μόνο το συμβατό `address` — τα νέα πεδία γίνονται null
  *      και το UI δείχνει κατάλληλο fallback. Καμία μετάπτωση δεν χρειάζεται.
+ *    • milestone 4: `delivery.postalCode` και `deliveryTerms` (ζώνη, ΤΚ,
+ *      μεταφορικά, όρια) — null/απόντα στις παλαιότερες.
  *
  *  Καθαρό module (χωρίς Firebase), ώστε να δοκιμάζεται απομονωμένα.
  * ========================================================================== */
@@ -15,6 +17,7 @@ import type {
   OrderLineOption,
   CheckoutCustomer,
   CheckoutDelivery,
+  DeliveryTermsSnapshot,
   OrderCancelReason,
   OrderStatus,
   PaymentMethod,
@@ -22,6 +25,8 @@ import type {
 import { isPaymentMethod } from "@/lib/checkout/constants";
 import { centsToEuros } from "@/lib/checkout/money";
 import { readOptionSnapshotForDisplay } from "@/lib/menu/options";
+import { readDeliveryTermsSnapshot } from "@/lib/shop/delivery-zones";
+import { normalizePostalCode } from "@/lib/shop/postal-code";
 
 export type AdminOrderLine = {
   itemId: string;
@@ -61,6 +66,8 @@ export type AdminOrder = {
   delivery: CheckoutDelivery | null;
   /** null σε παλαιότερες παραγγελίες */
   paymentMethod: PaymentMethod | null;
+  /** Milestone 4: ζώνη/ΤΚ/όροι παράδοσης ΟΠΩΣ αποθηκεύτηκαν — null σε παλαιότερες */
+  deliveryTerms: DeliveryTermsSnapshot | null;
   /** true όταν η παραγγελία δεν έχει δομημένα στοιχεία πελάτη/παράδοσης */
   isLegacy: boolean;
 };
@@ -132,10 +139,12 @@ function toDelivery(value: unknown): CheckoutDelivery | null {
   const floor = toText(delivery.floor);
   const doorbell = toText(delivery.doorbell);
   const instructions = toText(delivery.instructions);
+  const postalCode = normalizePostalCode(delivery.postalCode);
 
   return {
     street,
     city,
+    ...(postalCode ? { postalCode } : {}),
     ...(floor ? { floor } : {}),
     ...(doorbell ? { doorbell } : {}),
     ...(instructions ? { instructions } : {}),
@@ -179,6 +188,7 @@ export function mapAdminOrder(id: string, data: Record<string, unknown>): AdminO
     customer,
     delivery,
     paymentMethod: isPaymentMethod(data.paymentMethod) ? data.paymentMethod : null,
+    deliveryTerms: readDeliveryTermsSnapshot(data.deliveryTerms),
     isLegacy: customer === null && delivery === null,
   };
 }

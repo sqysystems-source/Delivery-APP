@@ -40,6 +40,8 @@ export default function HomePage() {
   const [shops, setShops] = useState<Shop[]>([]);
   const [cuisines, setCuisines] = useState<Cuisine[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  /** Milestone 4: πότε φορτώθηκαν τα καταστήματα — βάση για τη διαθεσιμότητα στις κάρτες */
+  const [loadedAt, setLoadedAt] = useState(0);
 
   const [activeCuisine, setActiveCuisine] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
@@ -53,6 +55,7 @@ export default function HomePage() {
         if (cancelled) return;
         setShops(shopData);
         setCuisines(cuisineData);
+        setLoadedAt(Date.now());
       })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
@@ -293,7 +296,7 @@ export default function HomePage() {
             ) : (
               <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
                 {visibleShops.map((shop, index) => (
-                  <ShopCard key={shop.id} shop={shop} eager={index < 3} />
+                  <ShopCard key={shop.id} shop={shop} eager={index < 3} observedAt={loadedAt} />
                 ))}
               </div>
             )}

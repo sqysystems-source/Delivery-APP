@@ -399,6 +399,7 @@ export function CartLines() {
 
 export function CartSummary() {
   const { cart, totals, deliveryAddress, orderNotes, setOrderNotes, closeCart } = useCart();
+  const zoned = cart.shop?.zonedDelivery === true;
   const [showNotes, setShowNotes] = useState(false);
 
   if (cart.lines.length === 0) return null;
@@ -440,22 +441,32 @@ export function CartSummary() {
           <span className="font-semibold text-gray-900">{formatPrice(totals.subtotal)}</span>
         </div>
 
-        <div className="flex items-center justify-between text-gray-600">
-          <span>Μεταφορικά</span>
-          <span
-            className={cn(
-              "font-semibold",
-              totals.deliveryFee === 0 ? "text-emerald-600" : "text-gray-900",
-            )}
-          >
-            {formatDeliveryFee(totals.deliveryFee)}
-          </span>
-        </div>
+        {/* Milestone 4: κατάστημα με ζώνες ΤΚ → τα μεταφορικά/ελάχιστη φαίνονται στο ταμείο */}
+        {zoned ? (
+          <p className="flex items-center justify-between text-gray-600">
+            <span>Μεταφορικά</span>
+            <span className="text-xs font-semibold text-gray-500">Ανάλογα με τον ΤΚ, στο ταμείο</span>
+          </p>
+        ) : (
+          <div className="flex items-center justify-between text-gray-600">
+            <span>Μεταφορικά</span>
+            <span
+              className={cn(
+                "font-semibold",
+                totals.deliveryFee === 0 ? "text-emerald-600" : "text-gray-900",
+              )}
+            >
+              {formatDeliveryFee(totals.deliveryFee)}
+            </span>
+          </div>
+        )}
 
-        <div className="flex items-center justify-between border-t border-dashed border-gray-200 pt-2.5 text-base">
-          <span className="font-bold text-gray-900">Σύνολο</span>
-          <span className="text-xl font-black text-gray-900">{formatPrice(totals.total)}</span>
-        </div>
+        {!zoned && (
+          <div className="flex items-center justify-between border-t border-dashed border-gray-200 pt-2.5 text-base">
+            <span className="font-bold text-gray-900">Σύνολο</span>
+            <span className="text-xl font-black text-gray-900">{formatPrice(totals.total)}</span>
+          </div>
+        )}
       </div>
 
       {/* --------------------------- Διεύθυνση -------------------------- */}
@@ -475,7 +486,7 @@ export function CartSummary() {
       </p>
 
       {/* ----------------------- Ελάχιστη παραγγελία -------------------- */}
-      {totals.missingForMinOrderCents > 0 && (
+      {!zoned && totals.missingForMinOrderCents > 0 && (
         <p className="mt-3 flex items-start gap-2 rounded-xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           Πρόσθεσε ακόμη {formatPrice(totals.missingForMinOrder)} για να φτάσεις την ελάχιστη

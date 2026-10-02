@@ -51,23 +51,48 @@ service cloud.firestore {
       // βρίσκει το μαγαζί του χρήστη με where("ownerUid","==",uid).
       allow read: if true;
 
-      allow create, delete: if isAdmin();
+      /* Milestone 4 — ΩΡΑΡΙΟ (`openingHours`) ΚΑΙ ΖΩΝΕΣ ΤΚ (`deliveryZones`):
+       * εμφωλευμένες λίστες με κανόνες για ΟΛΗ τη ρύθμιση (επικαλύψεις,
+       * βραδινές βάρδιες, εξαιρέσεις, μοναδικότητα ΤΚ σε όλες τις ζώνες,
+       * ποσά). Τα Rules δεν έχουν βρόχους, άρα:
+       *   • τα γράφει ΜΟΝΟ ο server (POST /api/admin/shop-settings, Admin
+       *     SDK), που επαληθεύει τον ΤΡΕΧΟΝΤΑ ιδιοκτήτη και όλη τη ρύθμιση·
+       *   • κανένας browser (ούτε admin) δεν τα δημιουργεί/αλλάζει/σβήνει·
+       *     μπορούν όμως να ΥΠΑΡΧΟΥΝ στο έγγραφο, ώστε οι υπόλοιπες άμεσες
+       *     εγγραφές του ιδιοκτήτη (π.χ. παύση) να συνεχίσουν να δουλεύουν. */
+      function touchesServerOnlySettings() {
+        return request.resource.data.diff(resource.data)
+          .affectedKeys()
+          .hasAny(['openingHours', 'deliveryZones']);
+      }
+
+      allow create: if isAdmin()
+        && !request.resource.data.keys().hasAny(['openingHours', 'deliveryZones']);
+      allow delete: if isAdmin();
 
       /* Ο ιδιοκτήτης αλλάζει όνομα, διεύθυνση, εικόνα, χρόνο παράδοσης και
-       * το `active` (ανοιχτά/κλειστά). ΔΕΝ αγγίζει:
+       * το `active` (milestone 4: false = «Προσωρινά δεν δεχόμαστε
+       * παραγγελίες» — ΜΟΝΟ boolean). ΔΕΝ αγγίζει:
        *  • ownerUid  → θα έδινε το μαγαζί σε άλλον
        *  • rating / reviews / tag → εμπορική προβολή, ανήκει στο Buka
        *  • minOrder / deliveryFee / freeDeliveryOver → τα διαβάζει το
        *    /api/orders τη στιγμή του υπολογισμού· αλλαγή στη μέση μιας
-       *    παραγγελίας θα άλλαζε το ποσό που χρεώνεται ο πελάτης. */
-      allow update: if isAdmin()
-        || (isShopOwner(shopId)
-            && !request.resource.data.diff(resource.data)
-                 .affectedKeys()
-                 .hasAny([
-                   'ownerUid', 'rating', 'reviews', 'tag',
-                   'minOrder', 'deliveryFee', 'freeDeliveryOver'
-                 ]));
+       *    παραγγελίας θα άλλαζε το ποσό που χρεώνεται ο πελάτης.
+       *  • openingHours / deliveryZones → μόνο μέσω server (βλ. παραπάνω) */
+      allow update: if !touchesServerOnlySettings()
+        && (isAdmin()
+            || (isShopOwner(shopId)
+                && !request.resource.data.diff(resource.data)
+                     .affectedKeys()
+                     .hasAny([
+                       'ownerUid', 'rating', 'reviews', 'tag',
+                       'minOrder', 'deliveryFee', 'freeDeliveryOver'
+                     ])
+                && (!request.resource.data.diff(resource.data)
+                       .affectedKeys()
+                       .hasAny(['active'])
+                    || ('active' in request.resource.data
+                        && request.resource.data.active is bool))));
 
       /* --------------------- Κατηγορίες μενού --------------------- */
       match /menuCategories/{categoryId} {

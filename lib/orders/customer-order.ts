@@ -23,6 +23,7 @@
 import type {
   OrderLineOption,
   CheckoutDelivery,
+  DeliveryTermsSnapshot,
   OrderCancelReason,
   OrderStatus,
   PaymentMethod,
@@ -30,6 +31,8 @@ import type {
 import { isPaymentMethod } from "@/lib/checkout/constants";
 import { centsToEuros } from "@/lib/checkout/money";
 import { readOptionSnapshotForDisplay } from "@/lib/menu/options";
+import { readDeliveryTermsSnapshot } from "@/lib/shop/delivery-zones";
+import { normalizePostalCode } from "@/lib/shop/postal-code";
 
 /* --------------------------------------------------------------------------
  *  Τύποι
@@ -65,6 +68,8 @@ export type CustomerOrder = {
   paymentMethod: PaymentMethod | null;
   /** null σε παλαιότερες παραγγελίες — τότε χρησιμοποιείται το `address` */
   delivery: CheckoutDelivery | null;
+  /** Milestone 4: ζώνη/ΤΚ/όροι παράδοσης της ΠΑΡΑΓΓΕΛΙΑΣ — null σε παλαιότερες */
+  deliveryTerms: DeliveryTermsSnapshot | null;
   address: string;
   notes: string | null;
   /** Ώρα του SERVER (serverTimestamp του Admin SDK) */
@@ -246,9 +251,11 @@ function toDelivery(value: unknown): CheckoutDelivery | null {
   const floor = toText(delivery.floor);
   const doorbell = toText(delivery.doorbell);
   const instructions = toText(delivery.instructions);
+  const postalCode = normalizePostalCode(delivery.postalCode);
   return {
     street,
     city,
+    ...(postalCode ? { postalCode } : {}),
     ...(floor ? { floor } : {}),
     ...(doorbell ? { doorbell } : {}),
     ...(instructions ? { instructions } : {}),
@@ -282,6 +289,7 @@ export function mapCustomerOrder(id: string, data: Record<string, unknown>): Cus
     total: money(data.totalCents, data.total),
     paymentMethod: isPaymentMethod(data.paymentMethod) ? data.paymentMethod : null,
     delivery,
+    deliveryTerms: readDeliveryTermsSnapshot(data.deliveryTerms),
     address:
       toText(data.address) ||
       (delivery ? [delivery.street, delivery.city].filter(Boolean).join(", ") : ""),

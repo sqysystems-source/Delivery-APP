@@ -11,6 +11,7 @@
  * ========================================================================== */
 
 import type {
+  CheckoutAvailabilityInfo,
   CheckoutErrorBody,
   CheckoutErrorCode,
   CheckoutFieldErrors,
@@ -19,6 +20,7 @@ import type {
   CheckoutSuccess,
 } from "@/types";
 import { parseOptionSnapshot } from "@/lib/menu/options";
+import { readDeliveryTermsSnapshot } from "@/lib/shop/delivery-zones";
 import { auth, ensureSignedIn } from "@/lib/firebase";
 
 export const CHECKOUT_ENDPOINT = "/api/orders";
@@ -38,6 +40,8 @@ export class CheckoutError extends Error {
   /** Milestone 3: option_unavailable / options_changed — ποια γραμμή */
   readonly lineKey?: string;
   readonly existingOrder?: { orderId: string; code: string };
+  /** Milestone 4 — shop_closed / shop_config_invalid: η διαθεσιμότητα όπως την είδε ο server */
+  readonly availability?: CheckoutAvailabilityInfo;
   /**
    * true όταν ΔΕΝ ξέρουμε αν δημιουργήθηκε παραγγελία (χάθηκε η απάντηση,
    * timeout, 5xx). Η επανάληψη με το ΙΔΙΟ κλειδί είναι ασφαλής: ο server
@@ -55,6 +59,7 @@ export class CheckoutError extends Error {
     itemId?: string;
     lineKey?: string;
     existingOrder?: { orderId: string; code: string };
+    availability?: CheckoutAvailabilityInfo;
   }) {
     super(options.message);
     this.name = "CheckoutError";
@@ -66,6 +71,7 @@ export class CheckoutError extends Error {
     this.itemId = options.itemId;
     this.lineKey = options.lineKey;
     this.existingOrder = options.existingOrder;
+    this.availability = options.availability;
   }
 }
 
@@ -111,8 +117,20 @@ function isQuote(value: unknown): value is CheckoutQuote {
     terms !== null &&
     isNumber(terms.minOrder) &&
     isNumber(terms.deliveryFee) &&
-    (terms.freeDeliveryOver === null || isNumber(terms.freeDeliveryOver))
+    (terms.freeDeliveryOver === null || isNumber(terms.freeDeliveryOver)) &&
+    /* Milestone 4: προαιρετικό (παλιές αποθηκευμένες απαντήσεις δεν το έχουν),
+     * αλλά αν υπάρχει πρέπει να διαβάζεται */
+    (quote.delivery === undefined || readDeliveryTermsSnapshot(quote.delivery) !== null)
   );
+}
+
+function parseAvailabilityInfo(value: unknown): CheckoutAvailabilityInfo | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const info = value as Record<string, unknown>;
+  if (info.state !== "closed" && info.state !== "paused" && info.state !== "unavailable") return undefined;
+  const nextOpenAt =
+    typeof info.nextOpenAt === "string" && !Number.isNaN(Date.parse(info.nextOpenAt)) ? info.nextOpenAt : null;
+  return { state: info.state, nextOpenAt };
 }
 
 /** Πλήρης, έγκυρη απάντηση επιτυχίας — κοινό με το recover-attempt.ts */
@@ -268,6 +286,7 @@ export async function submitOrder(
         typeof body.existingOrder.code === "string"
           ? body.existingOrder
           : undefined,
+      availability: parseAvailabilityInfo(body.availability),
     });
   }
 

@@ -43,6 +43,7 @@ import {
   type StatusTone,
 } from "@/lib/orders/customer-order";
 import { cn, formatDeliveryFee, formatPrice } from "@/lib/format";
+import { formatPostalCode } from "@/lib/shop/postal-code";
 
 const TONE_STYLES: Record<StatusTone, string> = {
   waiting: "border-amber-200 bg-amber-50 text-amber-900",
@@ -381,8 +382,15 @@ function OrderDetails({
           <span>
             Παράδοση σε:{" "}
             <span className="font-semibold text-gray-900">{order.address || "—"}</span>
+            {/* Milestone 4: ΤΚ και ζώνη από το στιγμιότυπο ΤΗΣ παραγγελίας */}
+            {order.delivery?.postalCode && <> · ΤΚ {formatPostalCode(order.delivery.postalCode)}</>}
             {order.delivery?.floor && <> · Όροφος {order.delivery.floor}</>}
             {order.delivery?.doorbell && <> · Κουδούνι «{order.delivery.doorbell}»</>}
+            {order.deliveryTerms?.mode === "zone" && (
+              <span className="mt-0.5 block text-xs text-gray-500">
+                Ζώνη παράδοσης «{order.deliveryTerms.zoneName}»
+              </span>
+            )}
           </span>
         </p>
         <p className="flex items-start gap-2 text-gray-700">
